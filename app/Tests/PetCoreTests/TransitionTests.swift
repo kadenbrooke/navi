@@ -81,4 +81,13 @@ final class TransitionTests: XCTestCase {
         // a brand-new row appearing idle: no alert
         XCTAssertTrue(IdleAlert.alerts(for: d.observe([("omnigent:p1", .idle), ("new", .idle)]), threads: [named]).isEmpty)
     }
+
+    func testIdleAlertCooldownIsPerThreadAndExpiresAtTheBoundary() {
+        var cooldown = IdleAlertCooldown(interval: 60)
+
+        XCTAssertTrue(cooldown.shouldPost(threadID: "a", now: 100))
+        XCTAssertFalse(cooldown.shouldPost(threadID: "a", now: 159.999))
+        XCTAssertTrue(cooldown.shouldPost(threadID: "b", now: 159.999))
+        XCTAssertTrue(cooldown.shouldPost(threadID: "a", now: 160))
+    }
 }

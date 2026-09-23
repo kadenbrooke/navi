@@ -55,6 +55,23 @@ public struct IdleAlert: Equatable, Sendable {
     }
 }
 
+/// Suppresses repeated idle notifications for the same thread while allowing
+/// unrelated threads to notify independently.
+public struct IdleAlertCooldown: Sendable {
+    public var interval: TimeInterval
+    private var lastPostedAt: [String: TimeInterval] = [:]
+
+    public init(interval: TimeInterval = 60) {
+        self.interval = interval
+    }
+
+    public mutating func shouldPost(threadID: String, now: TimeInterval) -> Bool {
+        if let last = lastPostedAt[threadID], now - last < interval { return false }
+        lastPostedAt[threadID] = now
+        return true
+    }
+}
+
 /// Nap logic: no state change on any thread for `threshold` → sleep. Any change (or a click,
 /// via `wake`) wakes her. A manual nap holds until woken the same way.
 public struct SleepTimer: Sendable {

@@ -41,6 +41,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -604,8 +605,8 @@ export function omnigentSessionDetailUrl(id, base = OMNIGENT_BASE) {
   // (the list said running, the parent itself did not) so the row's detail can
   // say so. Rows the map does not know keep their list status.
   // parentStatusById values can be either a plain string (legacy) or { status, seq }.
-  // A status of null/undefined means "baseline in flight, parent status unknown" —
-  // we don't use the roll-up; instead we mark the row as unknown with childActive.
+  // An unknown status carries no new information. Keep the list-derived state
+  // until a real own-status baseline or SSE edge arrives.
   export function applyParentStatus(sessions, parentStatusById) {
     if (!parentStatusById || typeof parentStatusById.get !== "function") return sessions;
     for (const s of sessions || []) {
@@ -616,12 +617,7 @@ export function omnigentSessionDetailUrl(id, base = OMNIGENT_BASE) {
       const listRunning = ACTIVE_STATUSES.has(String(s.listStatus ?? s.status).toLowerCase());
       // The roll-up can only over-report "running"; a non-running roll-up wins.
       if (!listRunning) continue;
-      // If parent status is unknown (baseline pending), don't use roll-up; mark unknown + childActive
-      if (own === null || own === undefined) {
-        s.status = "unknown";
-        s.childActive = true;
-        continue;
-      }
+      if (own === null || own === undefined || normalizeOmnigentStatus(own) === "unknown") continue;
       s.status = normalizeOmnigentStatus(own);
       s.childActive = !ACTIVE_STATUSES.has(s.status);
     }
@@ -1310,13 +1306,13 @@ export async function collect({
 // ---------------------------------------------------------------------------
 export function writeSnapshot(snapshot, { outFile = OUT_FILE, prevFile = PREV_FILE } = {}) {
   mkdirSync(dirname(outFile), { recursive: true });
+  const tmp = `${outFile}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(snapshot, null, 2) + "\n");
   if (existsSync(outFile)) {
     try {
-      renameSync(outFile, prevFile);
+      copyFileSync(outFile, prevFile);
     } catch {}
   }
-  const tmp = `${outFile}.tmp`;
-  writeFileSync(tmp, JSON.stringify(snapshot, null, 2) + "\n");
   renameSync(tmp, outFile);
 }
 

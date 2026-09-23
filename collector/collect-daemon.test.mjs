@@ -182,6 +182,14 @@ describe("parent-only status", () => {
     assert.equal(s.childActive, false);
   });
 
+  test("an unknown parent status preserves the list-derived state", () => {
+    for (const own of [null, undefined, "unknown"]) {
+      const [s] = applyParentStatus([om()], new Map([["p1", { status: own, seq: 1 }]]));
+      assert.equal(s.status, "running");
+      assert.equal(s.childActive, undefined);
+    }
+  });
+
   test("a non-running roll-up is authoritative: a stale 'running' overlay cannot revive it", () => {
     const [s] = applyParentStatus([om({ status: "idle", listStatus: "idle" })], new Map([["p1", "running"]]));
     assert.equal(s.status, "idle");
@@ -236,16 +244,18 @@ describe("parent-only status", () => {
 // ---------------------------------------------------------------------------
 // Atomic write
 // ---------------------------------------------------------------------------
-test("writeSnapshot leaves no temp file and the old snapshot as .prev", () => {
+test("writeSnapshot leaves no process temp file, preserves unrelated legacy tmp, and keeps the old snapshot as .prev", () => {
   const dir = mkdtempSync(join(tmpdir(), "bt-write-"));
   const out = join(dir, "threads.json");
   const prev = join(dir, "threads.prev.json");
+  writeFileSync(`${out}.tmp`, "unrelated");
   writeSnapshot({ generatedAt: "a", threads: [] }, { outFile: out, prevFile: prev });
   writeSnapshot({ generatedAt: "b", threads: [{ id: "x" }] }, { outFile: out, prevFile: prev });
-  assert.deepEqual(readdirSync(dir).sort(), ["threads.json", "threads.prev.json"]);
+  assert.deepEqual(readdirSync(dir).sort(), ["threads.json", "threads.json.tmp", "threads.prev.json"]);
   assert.equal(JSON.parse(readFileSync(out, "utf8")).generatedAt, "b");
   assert.equal(JSON.parse(readFileSync(prev, "utf8")).generatedAt, "a");
-  assert.equal(existsSync(`${out}.tmp`), false);
+  assert.equal(readFileSync(`${out}.tmp`, "utf8"), "unrelated");
+  assert.equal(existsSync(`${out}.${process.pid}.tmp`), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -288,7 +298,7 @@ class FakeSocket {
   }
 }
 
-function harness({ list = [listItem()], detail = {}, debounceMs = 20, graceMs = 60, ...over } = {}) {
+function harness({ list = [listItem()], detail = {}, debounceMs = 20, graceMs = 60, initialBaselineHoldMs = 1000, ...over } = {}) {
   const home = mkdtempSync(join(tmpdir(), "bt-home-"));
   mkdirSync(join(home, ".claude", "sessions"), { recursive: true });
   mkdirSync(join(home, ".claude", "agent-state"), { recursive: true });
@@ -304,6 +314,7 @@ function harness({ list = [listItem()], detail = {}, debounceMs = 20, graceMs = 
     outFile: join(home, "threads.json"),
     debounceMs,
     graceMs,
+    initialBaselineHoldMs,
     backoff: { min: 10, max: 40 },
     usage: false,
     watchFs: over.watchFs ?? false,
@@ -365,6 +376,27 @@ function harness({ list = [listItem()], detail = {}, debounceMs = 20, graceMs = 
 }
 
 const omnigentRows = (snap) => (snap?.threads || []).filter((t) => t.id.startsWith("omnigent:"));
+
+// Navi's "waiting on you" rule (PetCore NaviState + TransitionDetector +
+// IdleAlert): a thread is working when the collector says active or a parent
+// session is running; an alert fires only on working -> idle between two
+// consecutive observations. Absent threads never alert; the first observation
+// is silent.
+const naviState = (t) => {
+  const parentRunning = (t.sessions || []).some((s) => !s.child && ["running", "busy"].includes(String(s.status).toLowerCase()));
+  if (t.state === "active" || parentRunning) return "working";
+  return t.state === "idle" ? "idle" : t.state;
+};
+const idleAlerts = (snapshots) => {
+  const alerts = [];
+  let last = null;
+  for (const snap of snapshots) {
+    const next = new Map((snap.threads || []).map((t) => [t.id, naviState(t)]));
+    if (last) for (const [id, st] of next) if (last.get(id) === "working" && st === "idle") alerts.push(id);
+    last = next;
+  }
+  return alerts;
+};
 
 describe("daemon", () => {
   test("Omnigent parent: own status wins over the list roll-up, SSE edges flip the row", async () => {
@@ -506,26 +538,20 @@ describe("daemon", () => {
     h.d.stop();
   });
 
-  test("a Claude Code hook write under ~/.claude/agent-state triggers a collect", async () => {
+  test("a Claude Code hook write under ~/.claude/agent-state triggers a collect", async (t) => {
     const h = harness({ list: [], watchFs: true });
+    t.after(() => h.d.stop());
     await h.d.start();
     const n = h.snapshots.length;
-    // macOS FSEvents can drop a write that lands right after the watch starts, so
-    // keep rewriting (a hook rewrites the file every turn anyway) until one is seen.
-    const write = () =>
-      writeFileSync(
-        join(h.home, ".claude", "agent-state", "abc.json"),
-        JSON.stringify({ session_id: "abc", state: "waiting", cwd: h.repo, since: new Date().toISOString(), pid: 0 }),
-      );
-    write();
-    const again = setInterval(write, 250);
-    try {
-      await until(() => h.snapshots.length > n, { timeout: 5000 });
-      assert.ok(h.snapshots.at(-1).daemon.reasons.some((r) => r.startsWith("claude:")));
-    } finally {
-      clearInterval(again);
-      h.d.stop();
-    }
+    // macOS FSEvents can miss a write that lands right after the watch is
+    // armed, so the hook keeps writing (as a live session does) until seen.
+    const file = join(h.home, ".claude", "agent-state", "abc.json");
+    const hookWrite = () =>
+      writeFileSync(file, JSON.stringify({ session_id: "abc", state: "waiting", cwd: h.repo, since: new Date().toISOString(), pid: 0 }));
+    hookWrite();
+    const rewrite = setInterval(hookWrite, 250);
+    t.after(() => clearInterval(rewrite));
+    await until(() => h.snapshots.slice(n).some((snap) => snap.daemon.reasons.some((r) => r.startsWith("claude:"))), { timeout: 2500 });
   });
 });
 
@@ -582,7 +608,7 @@ test("collect() honours handed-in sources and the parent overlay without touchin
 // --- New tests for the fix round ---
 
 describe("parent-status baseline races", () => {
-  test("roll-up is NOT used while baseline is pending — parent shows unknown+childActive", async () => {
+  test("a new parent is withheld until its initial baseline settles", async (t) => {
     // Detail endpoint is slow; list says running (roll-up from children)
     let detailResolve;
     const detailPromise = new Promise((r) => (detailResolve = r));
@@ -600,28 +626,130 @@ describe("parent-status baseline races", () => {
         throw new Error(`unexpected fetch ${url}`);
       },
     });
+    t.after(() => h.d.stop());
     await h.d.start();
-    const sock = h.openSocket();
+    h.openSocket();
     await until(() => h.streams.has("p1"));
 
     // Baseline is in flight (detailPromise not resolved yet).
     // Force a collect to capture the pending-baseline state.
     await h.d.coalescer.flush("test");
 
-    // The row should NOT show "active" from the roll-up.
-    // It should show "idle" with "sub-agents still running" (parent status unknown, children running).
-    await until(() => {
-      const rows = omnigentRows(h.snapshots.at(-1));
-      return rows.length === 1 && rows[0].state === "idle" && rows[0].detail.includes("sub-agents still running");
-    }, { timeout: 2000 });
+    assert.ok(h.snapshots.length > 0);
+    assert.ok(h.snapshots.every((snapshot) => omnigentRows(snapshot).length === 0));
 
     // Now resolve the baseline — parent is actually idle
     detailResolve({ id: "p1", status: "idle" });
     await until(() => {
       const rows = omnigentRows(h.snapshots.at(-1));
-      return rows[0].state === "idle" && rows[0].detail.includes("sub-agents still running");
+      return rows[0]?.state === "idle" && rows[0].detail.includes("sub-agents still running");
     });
-    h.d.stop();
+    assert.ok(h.snapshots.every((snapshot) => omnigentRows(snapshot).every((row) => row.state !== "active")));
+    assert.deepEqual(idleAlerts(h.snapshots), []);
+  });
+
+  test("a daemon restart never fires an idle alert for a parent idle behind running children", async (t) => {
+    const child = listItem({ id: "c1", parent_session_id: "p1", status: "running", title: "explore" });
+    // First daemon: the parent is idle while its child runs; Navi has seen that.
+    const first = harness({ list: [listItem(), child], detail: { p1: "idle" } });
+    await first.d.start();
+    first.openSocket();
+    await until(() => omnigentRows(first.snapshots.at(-1))[0]?.state === "idle");
+    first.d.stop();
+
+    // Restarted daemon: same world, the detail endpoint answers a little late.
+    let detailResolve;
+    const detailPromise = new Promise((r) => (detailResolve = r));
+    const listData = [listItem(), child];
+    const second = harness({
+      list: listData,
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions/p1")) {
+          await detailPromise;
+          return { id: "p1", status: "idle" };
+        }
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions")) return { object: "list", data: listData, has_more: false, last_id: "c1" };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => second.d.stop());
+    await second.d.start();
+    second.openSocket();
+    await until(() => second.streams.has("p1"));
+    await second.d.coalescer.flush("test");
+    await sleep(30);
+    detailResolve();
+    await until(() => omnigentRows(second.snapshots.at(-1))[0]?.state === "idle");
+
+    // Navi saw both daemons' writes as one stream of observations.
+    assert.deepEqual(idleAlerts([...first.snapshots, ...second.snapshots]), []);
+    // No snapshot of the restarted daemon ever carried the child roll-up as the parent's own work.
+    assert.ok(second.snapshots.every((snapshot) => omnigentRows(snapshot).every((row) => row.state !== "active")));
+  });
+
+  test("a parent already shown is not withheld again when its roll-up returns to running", async (t) => {
+    const h = harness({ list: [listItem({ status: "idle" })], detail: { p1: "running" } });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    h.openSocket();
+    // Nothing about an idle row triggers a write after the WS opens; ask for one.
+    await until(() => h.d.wsConnected);
+    h.d.schedule("test:ws-open");
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "idle");
+
+    const before = h.snapshots.length;
+    h.d._handleFrame({ type: "changed", items: [listItem({ status: "running" })] });
+    await until(() => h.snapshots.length > before);
+    assert.ok(h.snapshots.slice(before).every((snapshot) => omnigentRows(snapshot).length === 1));
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "active");
+  });
+
+  test("an unresolved new parent appears conservatively idle after the bounded hold", async (t) => {
+    const never = new Promise(() => {});
+    const h = harness({
+      initialBaselineHoldMs: 40,
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions/p1")) return never;
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions")) return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "idle", { timeout: 1000 });
+    assert.equal(omnigentRows(h.snapshots.at(-1))[0].sessions[0].status, "unknown");
+    assert.deepEqual(idleAlerts(h.snapshots), []);
+  });
+
+  test("a parent past the hold follows its first real status, then alerts only on a real finish", async (t) => {
+    let detailResolve;
+    const detailPromise = new Promise((r) => (detailResolve = r));
+    const h = harness({
+      initialBaselineHoldMs: 40,
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions/p1")) {
+          await detailPromise;
+          return { id: "p1", status: "running" };
+        }
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions")) return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.sessions[0].status === "unknown", { timeout: 1000 });
+    detailResolve();
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "active");
+    assert.deepEqual(idleAlerts(h.snapshots), []);
+
+    h.streams.get("p1").onEvent({ event: "session.status", json: { status: "idle" } });
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "idle");
+    assert.deepEqual(idleAlerts(h.snapshots), ["omnigent:p1"]);
   });
 
   test("an SSE edge arriving during the initial baseline wins over its stale REST response", async (t) => {
@@ -680,6 +808,99 @@ describe("parent-status baseline races", () => {
     h.d.stop();
   });
 
+  test("a WS reconnect force-applies a changed detail baseline", async (t) => {
+    let detailCalls = 0;
+    const h = harness({
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions/p1")) {
+          detailCalls++;
+          return { id: "p1", status: detailCalls === 1 ? "running" : "idle" };
+        }
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions")) return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const first = h.openSocket();
+    await until(() => h.d.parentStatus.get("p1")?.status === "running");
+    first.close();
+    await until(() => h.sockets.length === 2);
+    h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "idle");
+    assert.equal(detailCalls, 2);
+  });
+
+  test("an SSE edge during a WS reconnect baseline wins over the stale detail response", async (t) => {
+    let detailCalls = 0;
+    let reconnectResolve;
+    const reconnectDetail = new Promise((resolve) => (reconnectResolve = resolve));
+    const h = harness({
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions/p1")) {
+          detailCalls++;
+          if (detailCalls === 1) return { id: "p1", status: "running" };
+          await reconnectDetail;
+          return { id: "p1", status: "idle" };
+        }
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions")) return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const first = h.openSocket();
+    await until(() => h.d.parentStatus.get("p1")?.status === "running");
+    first.close();
+    await until(() => h.sockets.length === 2);
+    h.openSocket();
+    await until(() => detailCalls === 2 && h.streams.has("p1"));
+    h.streams.get("p1").onEvent({ event: "session.status", json: { status: "running" } });
+    reconnectResolve();
+    await sleep(30);
+    assert.equal(h.d.parentStatus.get("p1")?.status, "running");
+  });
+
+  test("a WS reconnect re-baselines a parent whose earlier baseline failed", async (t) => {
+    let detailCalls = 0;
+    const h = harness({
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions/p1")) {
+          detailCalls++;
+          if (detailCalls <= 3) throw new Error("detail unavailable");
+          return { id: "p1", status: "idle" };
+        }
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions")) return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const first = h.openSocket();
+    await until(() => h.d.parentStatus.get("p1")?.status === "unknown", { timeout: 2000 });
+    first.close();
+    await until(() => h.sockets.length === 2);
+    h.openSocket();
+    await until(() => h.d.parentStatus.get("p1")?.status === "idle", { timeout: 2000 });
+  });
+
+  test("reconcile removes preserved parent status when the id is no longer wanted after reconnect", async (t) => {
+    const h = harness({ detail: { p1: "running" } });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const first = h.openSocket();
+    await until(() => h.d.parentStatus.get("p1")?.status === "running");
+    first.close();
+    h.state.list = [];
+    await until(() => h.sockets.length === 2);
+    h.openSocket();
+    await until(() => h.d.rows.size === 0);
+    assert.equal(h.d.parentStatus.has("p1"), false);
+  });
+
   test("a failed baseline retries and leaves a defined parent state", async (t) => {
     let detailCalls = 0;
     const h = harness({
@@ -701,6 +922,48 @@ describe("parent-status baseline races", () => {
     assert.equal(detailCalls, 2);
     assert.equal(h.d.pendingBaseline.has("p1"), false);
     h.d.stop();
+  });
+
+  test("WS reconnect and three failed baselines never create a false active-to-idle edge", async (t) => {
+    let detailCalls = 0;
+    const h = harness({
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions/p1")) {
+          detailCalls++;
+          if (detailCalls === 1) return { id: "p1", status: "running" };
+          throw new Error("detail unavailable");
+        }
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions")) {
+          return { object: "list", data: [listItem({ status: "running" })], has_more: false, last_id: "p1" };
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const firstSocket = h.openSocket();
+    await until(() => h.d.parentStatus.get("p1")?.status === "running");
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "active");
+
+    const reconnectSnapshots = h.snapshots.length;
+    firstSocket.close();
+    assert.equal(h.d.streams.size, 0);
+    await until(() => h.sockets.length === 2);
+    h.openSocket();
+    await until(() => detailCalls >= 4 && !h.d.pendingBaseline.has("p1"), { timeout: 2000 });
+    await h.d.coalescer.flush("test:after-fallback");
+
+    const states = h.snapshots
+      .slice(reconnectSnapshots)
+      .map((snapshot) => omnigentRows(snapshot)[0]?.state)
+      .filter(Boolean);
+    assert.ok(states.length > 0);
+    assert.deepEqual(new Set(states), new Set(["active"]));
+    assert.equal(h.d.parentStatus.get("p1")?.status, "running", "last-known own status survives reconnect fallback");
+
+    h.streams.get("p1").onEvent({ event: "session.status", json: { status: "idle" } });
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "idle");
   });
 
   test("an old baseline cannot write into a removed and re-added session entry", async (t) => {
@@ -740,6 +1003,38 @@ describe("parent-status baseline races", () => {
 });
 
 describe("tick resync", () => {
+  test("overlapping tick calls share one in-flight refresh", async (t) => {
+    let block = false;
+    let release;
+    let calls = 0;
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const h = harness({
+      list: [],
+      codexFn: async () => {
+        calls++;
+        concurrent++;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        if (block) await new Promise((resolve) => (release = resolve));
+        concurrent--;
+        return [];
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const startupCalls = calls;
+    block = true;
+
+    const first = h.d.tick();
+    await until(() => concurrent === 1);
+    const second = h.d.tick();
+    await sleep(20);
+    assert.equal(calls, startupCalls + 1);
+    assert.equal(maxConcurrent, 1);
+    release();
+    await Promise.all([first, second]);
+  });
+
   test("tick resyncs the list via REST even while WS is disconnected", async () => {
     let listCallCount = 0;
     const detailData = { p1: "running", p2: "running" };

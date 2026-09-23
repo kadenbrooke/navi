@@ -76,6 +76,7 @@ export const DAEMON = {
   DETAIL_TIMEOUT_MS: 8000, // parent-status baseline fetch
   LIST_TIMEOUT_MS: 15_000,
   BASELINE_ATTEMPTS: 3,
+  INITIAL_BASELINE_HOLD_MS: 2000,
 };
 
 // ---------------------------------------------------------------------------
@@ -281,6 +282,7 @@ export function createDaemon({
   tickMs = DAEMON.TICK_MS,
   graceMs = DAEMON.OMNIGENT_GRACE_MS,
   outagePollMs = Math.min(10_000, Math.max(1_000, Math.floor(graceMs / 2))),
+  initialBaselineHoldMs = DAEMON.INITIAL_BASELINE_HOLD_MS,
   backoff = { min: DAEMON.BACKOFF_MIN_MS, max: DAEMON.BACKOFF_MAX_MS },
   usage = process.env.NAVI_NO_USAGE !== "1",
   watchFs = true,
@@ -332,6 +334,8 @@ export function createDaemon({
   const parentStatus = new Map(); // id -> { status, seq } (normalized status + monotonic sequence)
   const pendingBaseline = new Map(); // id -> baseline token for the active stream generation
   const streams = new Map(); // id -> { handle, backoff, timer, baselineWait, gen }
+  const initialBaselines = new Map(); // id -> { startedAt, timer }: new running parents withheld until own status settles
+  const introducedParents = new Set(); // parent ids already shown in a snapshot (no cold-start hold again)
 
   let stopped = false;
   let tickTimer = null;
@@ -437,8 +441,76 @@ export function createDaemon({
     const restFresh = lastRestSuccessAt !== null && now() - lastRestSuccessAt <= graceMs;
     const down = !wsFresh && !restFresh;
     if (down) return { sessions: [], runners: cache.runnersStatus, error: `unavailable: ${omnigentError}` };
-    const sessions = mapOmnigentSessions([...rows.values()], { onlineRunners: cache.runners });
+    const { hidden, unresolved } = settleInitialBaselines();
+    let sessions = mapOmnigentSessions([...rows.values()], { onlineRunners: cache.runners });
+    if (hidden.size) {
+      // Withhold the parent and everything under it; a child alone would
+      // otherwise surface as a row of its own.
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const s of sessions) {
+          if (s.parentId && hidden.has(s.parentId) && !hidden.has(s.id)) {
+            hidden.add(s.id);
+            grew = true;
+          }
+        }
+      }
+      sessions = sessions.filter((s) => !hidden.has(s.id));
+    }
+    // Past the hold with still no own status: never show the roll-up's
+    // "running" (a later idle baseline would read as a finished turn). Unknown
+    // renders idle; a real baseline or edge then moves it either way.
+    for (const s of sessions) if (unresolved.has(s.id)) s.status = "unknown";
     return { sessions, runners: cache.runnersStatus };
+  }
+
+  const hasOwnStatus = (id) => {
+    const own = parentStatus.get(id)?.status;
+    return own !== null && own !== undefined && own !== "unknown";
+  };
+
+  // Cold-start guard. A running parent this daemon has never shown has only
+  // the list roll-up, which says "running" whenever a child runs. Showing that
+  // and then an idle baseline would fire a false "waiting on you" on every
+  // daemon (re)start. So a new running parent stays out of the snapshot until
+  // its own status settles, capped at initialBaselineHoldMs. A removed row
+  // never pops and a returning one is new to Navi, so neither can alert.
+  function settleInitialBaselines() {
+    const hidden = new Set();
+    const unresolved = new Set();
+    for (const id of [...introducedParents]) if (!rows.has(id)) introducedParents.delete(id);
+    for (const id of [...initialBaselines.keys()]) if (!rows.has(id)) clearInitialBaseline(id);
+    for (const row of rows.values()) {
+      if (row.parent_session_id) continue;
+      let hold = initialBaselines.get(row.id);
+      if (hold && (hasOwnStatus(row.id) || !wantsParentStream(row))) {
+        clearInitialBaseline(row.id);
+        hold = null;
+      } else if (!hold && !introducedParents.has(row.id) && wantsParentStream(row) && !hasOwnStatus(row.id) && !stopped) {
+        hold = { startedAt: now(), timer: null };
+        initialBaselines.set(row.id, hold);
+        const h = hold;
+        h.timer = setTimeout(() => {
+          h.timer = null;
+          if (initialBaselines.get(row.id) === h) schedule("omnigent:initial-baseline-timeout");
+        }, initialBaselineHoldMs);
+      }
+      if (hold && now() - hold.startedAt < initialBaselineHoldMs) {
+        hidden.add(row.id);
+        continue;
+      }
+      if (hold) unresolved.add(row.id);
+      introducedParents.add(row.id);
+    }
+    return { hidden, unresolved };
+  }
+
+  function clearInitialBaseline(id) {
+    const hold = initialBaselines.get(id);
+    if (!hold) return;
+    if (hold.timer) clearTimeout(hold.timer);
+    initialBaselines.delete(id);
   }
 
   // ---- Omnigent WS ------------------------------------------------------------
@@ -499,9 +571,10 @@ export function createDaemon({
     if (wasConnected || wsDisconnectedAt === null) wsDisconnectedAt = now();
     omnigentError = reason || "closed";
     if (wasConnected) log(`omnigent ws down: ${omnigentError}`);
-    // Every parent stream is now unverifiable; drop them (they reopen on resync).
+    // Streams reopen on resync. Preserve each parent's last-known own status
+    // across the transport outage so reconnect bookkeeping cannot manufacture
+    // a working -> idle transition.
     for (const id of [...streams.keys()]) closeStream(id);
-    parentStatus.clear();
     if (!stopped) {
       wsBackoff = nextBackoff(wsBackoff, backoff);
       wsTimer = setTimeout(() => {
@@ -671,10 +744,14 @@ export function createDaemon({
     for (const id of [...streams.keys()]) {
       if (!wanted.has(id)) {
         closeStream(id);
-        // Not running per the roll-up ⇒ the parent is not running. The list
-        // status is authoritative again.
-        parentStatus.delete(id);
-        pendingBaseline.delete(id);
+      }
+    }
+    // While connected, the list is authoritative about which parents can need
+    // an own-status overlay. This also removes entries preserved across an outage
+    // when their sessions disappeared before reconnect.
+    if (wsConnected) {
+      for (const id of [...parentStatus.keys()]) {
+        if (!wanted.has(id)) parentStatus.delete(id);
       }
     }
   }
@@ -682,16 +759,17 @@ export function createDaemon({
   function openStream(id) {
     const entry = { handle: null, backoff: 0, timer: null, baselineWait: null, gen: 0 };
     streams.set(id, entry);
-    // Install the unknown placeholder before opening SSE so collection never
-    // falls back to the list's child roll-up while the baseline is in flight.
-    parentStatus.set(id, { status: null, seq: 0 });
+    // A brand-new parent has no own status yet. A reconnect keeps the last-known
+    // value until its new baseline or a real SSE edge replaces it: the stream
+    // only carries edges, so a change during the outage exists nowhere else.
+    if (!parentStatus.has(id)) parentStatus.set(id, { status: null, seq: 0 });
     startStream(id, entry);
-    // Opening a stream means we'll soon have parent status; schedule a collect so the
-    // row updates from roll-up to "unknown+childActive" (or the real status) promptly.
+    // Opening a stream means we'll soon have parent status; schedule a collect so
+    // a brand-new row appears promptly while its baseline is in flight.
     schedule("omnigent:stream-opened");
   }
 
-  function startStream(id, entry, { forceBaseline = false } = {}) {
+  function startStream(id, entry) {
     if (stopped || streams.get(id) !== entry) return;
     const gen = ++entry.gen;
     const url = `${omnigentBase}/v1/sessions/${id}/stream`;
@@ -727,14 +805,14 @@ export function createDaemon({
           if (streams.get(id) === entry && wantsParentStream(rows.get(id))) {
             // Bump/open the new generation first, then bind exactly one
             // re-baseline to that generation.
-            startStream(id, entry, { forceBaseline: true });
+            startStream(id, entry);
           } else {
             closeStream(id);
           }
         }, jittered);
       },
     });
-    baseline(id, { force: forceBaseline, entry, gen });
+    baseline(id, { entry, gen });
   }
 
   function closeStream(id) {
@@ -756,7 +834,7 @@ export function createDaemon({
   // Each baseline belongs to one concrete stream entry and generation. This
   // prevents an old request from writing into a removed/re-added session whose
   // per-entry generation happens to have the same number.
-  async function baseline(id, { force = false, entry, gen } = {}) {
+  async function baseline(id, { entry, gen } = {}) {
     if (streams.get(id) !== entry || entry.gen !== gen) return;
     const token = { entry, gen };
     pendingBaseline.set(id, token);
@@ -789,13 +867,13 @@ export function createDaemon({
         const own = normalizeOmnigentStatus(d.status);
         const prev = parentStatus.get(id);
         const currentSeq = prev?.seq ?? 0;
-        const noRealStatusYet = !prev || prev.status === null;
+        // Every (re)open replaces the last-known value unless an SSE edge landed
+        // while the fetch was in flight (the edge is fresher).
         const noEdgeDuringFetch = currentSeq === baselineStartSeq;
-        const shouldApply = force ? noEdgeDuringFetch : noRealStatusYet;
-        if (shouldApply) {
+        if (noEdgeDuringFetch) {
           const newSeq = currentSeq + 1;
           parentStatus.set(id, { status: own, seq: newSeq });
-          dlog(`parent ${id.slice(0, 8)} baseline ${own} (seq ${newSeq})${force ? " [forced]" : ""}`);
+          dlog(`parent ${id.slice(0, 8)} baseline ${own} (seq ${newSeq})`);
           schedule("omnigent:parent-baseline");
         } else {
           dlog(`parent ${id.slice(0, 8)} baseline skipped — newer edge/status exists (seq ${currentSeq}, start ${baselineStartSeq})`);
@@ -856,25 +934,32 @@ export function createDaemon({
   }
 
   // ---- slow tick --------------------------------------------------------------------
-  async function tick(reason = "tick") {
-    if (stopped) return;
-    gitDirty = true;
-    procsDirty = true;
-    try {
-      cache.codex = await codexFn(home, { procs: cache.procs || undefined });
-    } catch (e) {
-      cache.codex = cache.codex || [];
-      dlog(`codex: ${e?.message || e}`);
-    }
-    // Always resync via REST regardless of WS state. During an extended WS outage,
-    // the REST list is the only way to get fresh session data. On failure,
-    // resyncList leaves rows alone and records omnigentError; the staleness/grace
-    // logic will surface "collector/omnigent down" without a misleading snapshot.
-    await resyncList(reason);
-    await coalescer.flush(reason);
-    // Quota usage last and off the critical path: its fetchers talk to five
-    // providers and can take tens of seconds. It lands as its own cheap collect.
-    if (usage) await refreshUsage();
+  let tickInFlight = null;
+  function tick(reason = "tick") {
+    if (stopped) return Promise.resolve();
+    if (tickInFlight) return tickInFlight;
+    tickInFlight = (async () => {
+      gitDirty = true;
+      procsDirty = true;
+      try {
+        cache.codex = await codexFn(home, { procs: cache.procs || undefined });
+      } catch (e) {
+        cache.codex = cache.codex || [];
+        dlog(`codex: ${e?.message || e}`);
+      }
+      // Always resync via REST regardless of WS state. During an extended WS outage,
+      // the REST list is the only way to get fresh session data. On failure,
+      // resyncList leaves rows alone and records omnigentError; the staleness/grace
+      // logic will surface "collector/omnigent down" without a misleading snapshot.
+      await resyncList(reason);
+      await coalescer.flush(reason);
+      // Quota usage last and off the critical path: its fetchers talk to five
+      // providers and can take tens of seconds. It lands as its own cheap collect.
+      if (usage) await refreshUsage();
+    })().finally(() => {
+      tickInFlight = null;
+    });
+    return tickInFlight;
   }
 
   let usageInFlight = false;
@@ -917,6 +1002,7 @@ export function createDaemon({
     if (graceTimer) clearTimeout(graceTimer);
     if (watchTimer) clearTimeout(watchTimer);
     if (restPollTimer) clearTimeout(restPollTimer);
+    for (const id of [...initialBaselines.keys()]) clearInitialBaseline(id);
     coalescer.cancel();
     for (const id of [...streams.keys()]) closeStream(id);
     for (const w of watchers) {
@@ -981,7 +1067,10 @@ if (isMain) {
   };
   process.on("SIGTERM", () => bye("SIGTERM"));
   process.on("SIGINT", () => bye("SIGINT"));
-  process.on("uncaughtException", (e) => defaultLog(`uncaught: ${e?.stack || e}`));
+  process.on("uncaughtException", (e) => {
+    defaultLog(`uncaught: ${e?.stack || e}`);
+    process.exit(1);
+  });
   process.on("unhandledRejection", (e) => defaultLog(`unhandled rejection: ${e?.stack || e}`));
   daemon.start().catch((e) => {
     defaultLog(`daemon start failed: ${e?.stack || e}`);

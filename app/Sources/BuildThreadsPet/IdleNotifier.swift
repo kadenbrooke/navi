@@ -9,6 +9,7 @@ import PetCore
 final class IdleNotifier {
     private let bundled = Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil
     private var authorization = IdleNotificationAuthorization()
+    private var cooldown = IdleAlertCooldown(interval: 60)
 
     func prepare() {
         guard bundled else { return }
@@ -16,14 +17,19 @@ final class IdleNotifier {
     }
 
     func post(_ alert: IdleAlert) {
+        guard cooldown.shouldPost(threadID: alert.id, now: Date().timeIntervalSince1970) else { return }
         NSLog("Navi: idle alert — %@", alert.message)
         if bundled {
             perform(authorization.post(alert))
         } else {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            let body = alert.message.replacingOccurrences(of: "\"", with: "\\\"")
-            p.arguments = ["-e", "display notification \"\(body)\" with title \"Navi\""]
+            p.arguments = [
+                "-e", "on run argv",
+                "-e", "display notification (item 1 of argv) with title \"Navi\"",
+                "-e", "end run",
+                alert.message,
+            ]
             try? p.run()
         }
     }
@@ -31,6 +37,20 @@ final class IdleNotifier {
     private func perform(_ actions: [IdleNotificationAuthorization.Action]) {
         for action in actions {
             switch action {
+            case .checkSettings:
+                UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+                    guard let self else { return }
+                    let status: IdleNotificationAuthorization.Settings
+                    switch settings.authorizationStatus {
+                    case .notDetermined: status = .notDetermined
+                    case .authorized, .provisional, .ephemeral: status = .authorized
+                    case .denied: status = .denied
+                    @unknown default: status = .denied
+                    }
+                    DispatchQueue.main.async {
+                        self.perform(self.authorization.resolveSettings(status))
+                    }
+                }
             case .requestAuthorization:
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] ok, err in
                     guard let self else { return }
