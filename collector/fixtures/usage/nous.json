@@ -1,0 +1,53 @@
+{
+  "context": "personal",
+  "current": {
+    "tierId": "tier_free_000000000000000",
+    "tierName": "Free",
+    "monthlyCredits": "0",
+    "creditsRemaining": "0",
+    "cycleEndsAt": "2026-10-02T21:03:53.000Z",
+    "cancelAtPeriodEnd": false,
+    "cancellationEffectiveAt": null,
+    "pendingDowngradeTierName": null,
+    "pendingDowngradeAt": null
+  },
+  "tiers": [
+    {
+      "tierId": "tier_free_000000000000000",
+      "name": "Free",
+      "tierOrder": 5,
+      "dollarsPerMonthDisplay": "0",
+      "monthlyCredits": "0",
+      "isCurrent": true,
+      "isEnabled": true
+    },
+    {
+      "tierId": "tier_plus_000000000000000",
+      "name": "Plus",
+      "tierOrder": 2,
+      "dollarsPerMonthDisplay": "20",
+      "monthlyCredits": "22",
+      "isCurrent": false,
+      "isEnabled": true
+    },
+    {
+      "tierId": "tier_super_00000000000000",
+      "name": "Super",
+      "tierOrder": 4,
+      "dollarsPerMonthDisplay": "100",
+      "monthlyCredits": "110",
+      "isCurrent": false,
+      "isEnabled": true
+    },
+    {
+      "tierId": "tier_ultra_00000000000000",
+      "name": "Ultra",
+      "tierOrder": 9,
+      "dollarsPerMonthDisplay": "200",
+      "monthlyCredits": "220",
+      "isCurrent": false,
+      "isEnabled": true
+    }
+  ],
+  "canChangePlan": true
+}

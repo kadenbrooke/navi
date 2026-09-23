@@ -1,0 +1,90 @@
+{
+  "plan_type": "plus",
+  "rate_limit": {
+    "allowed": false,
+    "limit_reached": true,
+    "primary_window": {
+      "used_percent": 0,
+      "limit_window_seconds": 18000,
+      "reset_after_seconds": 18000,
+      "reset_at": 1789781743
+    },
+    "secondary_window": {
+      "used_percent": 100,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 71898,
+      "reset_at": 1789835640
+    }
+  },
+  "code_review_rate_limit": null,
+  "additional_rate_limits": [
+    {
+      "limit_name": "gpt-reserve",
+      "metered_feature": "base_model_inference",
+      "rate_limit": {
+        "allowed": false,
+        "limit_reached": true,
+        "primary_window": {
+          "used_percent": 100,
+          "limit_window_seconds": 604800,
+          "reset_after_seconds": 378199,
+          "reset_at": 1790141942
+        },
+        "secondary_window": null
+      },
+      "normal_model_slug": "gpt-5.6-luna"
+    }
+  ],
+  "model_usage": {
+    "gpt-6-astra": {
+      "available": false,
+      "available_at": "2026-09-19T16:34:01.490915Z",
+      "credits_would_enable": true
+    }
+  },
+  "credits": {
+    "has_credits": false,
+    "unlimited": false,
+    "overage_limit_reached": false,
+    "balance": "0",
+    "approx_local_messages": [
+      0,
+      0
+    ],
+    "approx_cloud_messages": [
+      0,
+      0
+    ]
+  },
+  "spend_control": {
+    "reached": false,
+    "individual_limit": null
+  },
+  "rate_limit_reached_type": {
+    "type": "rate_limit_reached",
+    "details": "default"
+  },
+  "rate_limit_upsell": {
+    "banner_type": "plus_rate_limit_reached",
+    "title": "You're out of Codex messages",
+    "description": "Your rate limit resets on {time}. To continue using Codex, add credits or upgrade to Pro today.",
+    "ctas": [
+      {
+        "action": "open_pricing_dialog",
+        "label": "Upgrade"
+      },
+      {
+        "action": "add_credits",
+        "label": "Add Credits"
+      }
+    ],
+    "reset_at": 1789835640,
+    "referral": null,
+    "request_url": null
+  },
+  "promo": null,
+  "rate_limit_reset_credits": {
+    "available_count": 0,
+    "applicable_available_count": 0
+  }
+}

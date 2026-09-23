@@ -1,0 +1,46 @@
+{
+  "quota": {
+    "response": {
+      "groups": [
+        {
+          "displayName": "Gemini Models",
+          "buckets": [
+            {
+              "bucketId": "gemini-weekly",
+              "displayName": "Weekly Limit Remaining",
+              "window": "weekly",
+              "remainingFraction": 0.9822232,
+              "resetTime": "2026-09-25T07:04:38Z"
+            }
+          ]
+        },
+        {
+          "displayName": "Claude and GPT models",
+          "buckets": [
+            {
+              "bucketId": "3p-weekly",
+              "displayName": "Weekly Limit Remaining",
+              "window": "weekly",
+              "remainingFraction": 1,
+              "resetTime": "2026-09-25T18:32:58Z"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "status": {
+    "userStatus": {
+      "planStatus": {
+        "planInfo": {
+          "planName": "Pro",
+          "monthlyPromptCredits": 50000
+        },
+        "availablePromptCredits": 500
+      },
+      "userTier": {
+        "name": "Antigravity Starter Quota"
+      }
+    }
+  }
+}

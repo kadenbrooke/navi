@@ -1,0 +1,25 @@
+{
+  "billingCycleStart": "1788400000000",
+  "billingCycleEnd": "1790992000000",
+  "planUsage": {
+    "totalSpend": 100,
+    "bonusSpend": 100,
+    "remainingBonus": false,
+    "bonusTooltip": "We work with model providers to give you free usage beyond what you've purchased. Amounts may vary.",
+    "autoPercentUsed": 100,
+    "apiPercentUsed": 39,
+    "totalPercentUsed": 69.5
+  },
+  "spendLimitUsage": {
+    "pooledLimit": 0,
+    "pooledRemaining": 0,
+    "individualLimit": 0,
+    "limitType": "user",
+    "overallLimit": 0,
+    "overallRemaining": 0
+  },
+  "displayThreshold": 200,
+  "displayMessage": "You've used 0% of your included usage",
+  "autoModelSelectedDisplayMessage": "You've used 70% of your included total usage",
+  "namedModelSelectedDisplayMessage": "You've used 39% of your included API usage"
+}

@@ -1,0 +1,168 @@
+{
+  "_comment": "Sanitized two-page /v1/sessions response (fake ids, fake titles, no tokens). Page 2 is what ?after=<page1.last_id> returns. updated_at_offset_s is relative to NOW in collect.test.mjs. runner_online is the liveness signal: false = the harness is not running = invisible.",
+  "runners": {
+    "data": [
+      { "runner_id": "runner_token_fake_online_1", "online": true, "harnesses": ["claude-sdk"] },
+      { "runner_id": "runner_token_fake_offline_1", "online": false, "harnesses": ["claude-sdk"] }
+    ]
+  },
+  "pages": [
+    {
+      "object": "list",
+      "first_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+      "last_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa05",
+      "has_more": true,
+      "data": [
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+          "agent_name": "polly",
+          "status": "running",
+          "runner_id": "runner_token_fake_online_1",
+          "runner_online": true,
+          "updated_at_offset_s": 540,
+          "title": "Refactor the config loader",
+          "labels": { "omnigent.last_task_error_code": "", "omnigent.last_task_error_title": "", "omnigent.ui": "terminal" },
+          "pending_elicitations_count": 0,
+          "workspace": "/repo",
+          "archived": false,
+          "viewer_unread": false,
+          "git_branch": null
+        },
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+          "agent_name": "assistant",
+          "status": "running",
+          "runner_id": "runner_token_fake_offline_1",
+          "runner_online": false,
+          "updated_at_offset_s": 60,
+          "title": "Says running but its runner is gone",
+          "labels": { "omnigent.last_task_error_code": "", "omnigent.last_task_error_title": "" },
+          "pending_elicitations_count": 0,
+          "workspace": "/repo",
+          "archived": false,
+          "viewer_unread": false,
+          "git_branch": null
+        },
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa03",
+          "agent_name": "assistant",
+          "status": "running",
+          "runner_id": "runner_token_fake_online_1",
+          "runner_online": true,
+          "updated_at_offset_s": 60,
+          "title": "Archived but still running",
+          "labels": {},
+          "pending_elicitations_count": 0,
+          "workspace": "/repo",
+          "archived": true,
+          "viewer_unread": false,
+          "git_branch": null
+        },
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa04",
+          "agent_name": "polly",
+          "sub_agent_name": "explorer",
+          "kind": "sub_agent",
+          "parent_session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+          "status": "idle",
+          "runner_id": "runner_token_fake_online_1",
+          "runner_online": true,
+          "updated_at_offset_s": 120,
+          "title": "explore the fixtures dir",
+          "labels": {},
+          "pending_elicitations_count": 0,
+          "workspace": "/repo",
+          "archived": false,
+          "viewer_unread": false,
+          "git_branch": null
+        },
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa05",
+          "agent_name": "polly",
+          "status": "idle",
+          "runner_id": "runner_token_fake_online_1",
+          "runner_online": true,
+          "updated_at_offset_s": 3600,
+          "title": "Tidy up the menu labels",
+          "labels": { "omnigent.last_task_error_code": "", "omnigent.last_task_error_title": "" },
+          "pending_elicitations_count": 0,
+          "workspace": "/repo-worktrees/worktree-b1468d65",
+          "archived": false,
+          "viewer_unread": false,
+          "git_branch": "worktree-b1468d65"
+        }
+      ]
+    },
+    {
+      "object": "list",
+      "first_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06",
+      "last_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa09",
+      "has_more": false,
+      "data": [
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa06",
+          "agent_name": "polly",
+          "status": "failed",
+          "runner_id": "runner_token_fake_online_1",
+          "runner_online": true,
+          "updated_at_offset_s": 7200,
+          "title": "Profile the slow import",
+          "labels": {
+            "omnigent.last_task_error_code": "runner_disconnected",
+            "omnigent.last_task_error_title": "Runner disconnected unexpectedly.",
+            "omnigent.last_task_error_message": "Runner disconnected unexpectedly. Restart the runner."
+          },
+          "pending_elicitations_count": 0,
+          "workspace": "/repo",
+          "archived": false,
+          "viewer_unread": false,
+          "git_branch": null
+        },
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa07",
+          "agent_name": "assistant",
+          "status": "idle",
+          "runner_id": "runner_token_fake_online_1",
+          "runner_online": true,
+          "updated_at_offset_s": 900,
+          "title": "Which chart library should we use?",
+          "labels": { "omnigent.last_task_error_code": "" },
+          "pending_elicitations_count": 1,
+          "workspace": "/repo",
+          "archived": false,
+          "viewer_unread": false,
+          "git_branch": null
+        },
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa08",
+          "agent_name": "assistant",
+          "status": "idle",
+          "runner_id": "runner_token_fake_online_1",
+          "runner_online": true,
+          "updated_at_offset_s": 1800,
+          "title": "Plan the next release",
+          "labels": { "omnigent.last_task_error_code": "" },
+          "pending_elicitations_count": 0,
+          "workspace": "/repo",
+          "archived": false,
+          "viewer_unread": true,
+          "git_branch": null
+        },
+        {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa09",
+          "agent_name": "assistant",
+          "status": "idle",
+          "runner_id": "runner_token_fake_online_1",
+          "updated_at_offset_s": 259200,
+          "title": "Old chat whose runner is still up",
+          "labels": { "omnigent.last_task_error_code": "" },
+          "pending_elicitations_count": 0,
+          "workspace": "/repo",
+          "archived": false,
+          "viewer_unread": false,
+          "git_branch": null
+        }
+      ]
+    }
+  ]
+}
