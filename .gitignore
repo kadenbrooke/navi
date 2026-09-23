@@ -1,0 +1,29 @@
+# Swift
+.build/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Sound files are never committed: Navi ships silent, and clips you try out
+# locally (see README → Sounds) stay on your Mac.
+*.wav
+*.mp3
+*.ogg
+*.m4a
+*.aiff
+*.aif
+*.caf
+*.flac
+
+# Local runtime output if you point NAVI_THREADS_PATH inside the clone
+*.tmp
+*.part
+notified.json
+usage-cache.json
+threads.prev.json
