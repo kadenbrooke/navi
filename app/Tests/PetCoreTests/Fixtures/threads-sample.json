@@ -1,0 +1,649 @@
+{
+  "generatedAt": "2026-09-17T05:56:16.778Z",
+  "repo": "/work/example-app",
+  "sources": {
+    "git": "ok",
+    "gh": "ok",
+    "registry": "ok",
+    "claude": "ok",
+    "omnigent": "ok",
+    "codex": "ok"
+  },
+  "threads": [
+    {
+      "id": "polly/demo-recording",
+      "name": "demo-recording",
+      "worktreePath": "/work/example-app-wt/demo-recording",
+      "branch": "polly/demo-recording",
+      "state": "stale",
+      "stateLabel": "Behind main — needs a rebase or should be deleted",
+      "detail": "47 commits behind main",
+      "reviewReady": false,
+      "pr": {
+        "number": 13,
+        "url": "https://github.com/example/example-app/pull/13",
+        "title": "Demo: record the canvas and export stills",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 3,
+        "behind": 47,
+        "dirtyFiles": 0,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-14T00:27:19Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/demo-recording\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/13\""
+        },
+        {
+          "label": "Catch up with main",
+          "command": "git pull --rebase origin main"
+        }
+      ]
+    },
+    {
+      "id": "polly/search-index",
+      "name": "search-index",
+      "worktreePath": "/work/example-app-wt/search-index",
+      "branch": "polly/search-index",
+      "state": "pr-open",
+      "stateLabel": "PR open, review not done",
+      "detail": "PR #18 open, no reviewer has signed off yet",
+      "reviewReady": false,
+      "pr": {
+        "number": 18,
+        "url": "https://github.com/example/example-app/pull/18",
+        "title": "Search: add a trigram index for fuzzy lookup",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 4,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T22:08:00Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/search-index\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/18\""
+        }
+      ]
+    },
+    {
+      "id": "polly/cli-flags",
+      "name": "cli-flags",
+      "worktreePath": "/work/example-app-wt/cli-flags",
+      "branch": "polly/cli-flags",
+      "state": "pr-open",
+      "stateLabel": "PR open, review not done",
+      "detail": "PR #20 open, no reviewer has signed off yet",
+      "reviewReady": false,
+      "pr": {
+        "number": 20,
+        "url": "https://github.com/example/example-app/pull/20",
+        "title": "CLI: consistent flag parsing and --help output",
+        "state": "OPEN"
+      },
+      "sessions": [
+        {
+          "harness": "codex",
+          "id": "8b209f37-9ca8-f62d-57de-a292d7cdd2cb",
+          "title": "Run the three test commands inside the sandbox",
+          "status": "unknown",
+          "lastSeen": "2026-09-15T21:36:26.948Z"
+        }
+      ],
+      "git": {
+        "ahead": 3,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T21:37:47Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/cli-flags\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/20\""
+        }
+      ]
+    },
+    {
+      "id": "polly/dark-mode",
+      "name": "dark-mode",
+      "worktreePath": "/work/example-app-wt/dark-mode",
+      "branch": "polly/dark-mode",
+      "state": "pr-open",
+      "stateLabel": "PR open, review not done",
+      "detail": "PR #22 open, no reviewer has signed off yet",
+      "reviewReady": false,
+      "pr": {
+        "number": 22,
+        "url": "https://github.com/example/example-app/pull/22",
+        "title": "UI: dark mode for the settings screen",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 4,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T22:11:22Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/dark-mode\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/22\""
+        }
+      ]
+    },
+    {
+      "id": "polly/payment-retry",
+      "name": "payment-retry",
+      "worktreePath": "/work/example-app-wt/payment-retry",
+      "branch": "polly/payment-retry",
+      "state": "pr-open",
+      "stateLabel": "PR open, review not done",
+      "detail": "PR #16 open, no reviewer has signed off yet",
+      "reviewReady": false,
+      "pr": {
+        "number": 16,
+        "url": "https://github.com/example/example-app/pull/16",
+        "title": "Payments: retry failed charges with backoff",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 2,
+        "behind": 8,
+        "dirtyFiles": 0,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T19:13:54Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/payment-retry\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/16\""
+        }
+      ]
+    },
+    {
+      "id": "polly/classifier-eval",
+      "name": "classifier-eval",
+      "worktreePath": "/work/example-app-wt/classifier-eval",
+      "branch": "polly/classifier-eval",
+      "state": "pr-open",
+      "stateLabel": "PR open, review not done",
+      "detail": "PR #24 open, no reviewer has signed off yet",
+      "reviewReady": false,
+      "pr": {
+        "number": 24,
+        "url": "https://github.com/example/example-app/pull/24",
+        "title": "Classifier: A/B two models on the eval set",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 2,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-17T04:32:08Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/classifier-eval\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/24\""
+        }
+      ]
+    },
+    {
+      "id": "polly/cache-layer",
+      "name": "cache-layer",
+      "worktreePath": "/work/example-app-wt/cache-layer",
+      "branch": "polly/cache-layer",
+      "state": "pr-open",
+      "stateLabel": "PR open, review not done",
+      "detail": "PR #23 open, no reviewer has signed off yet",
+      "reviewReady": false,
+      "pr": {
+        "number": 23,
+        "url": "https://github.com/example/example-app/pull/23",
+        "title": "Cache: one shared layer for API responses",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 4,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-16T07:14:31Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/cache-layer\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/23\""
+        }
+      ]
+    },
+    {
+      "id": "polly/status-widget",
+      "name": "status-widget",
+      "worktreePath": "/work/example-app-wt/status-widget",
+      "branch": "polly/status-widget",
+      "state": "uncommitted",
+      "stateLabel": "Work on your Mac only, not saved to git yet",
+      "detail": "1 changed file not committed",
+      "reviewReady": false,
+      "pr": null,
+      "sessions": [
+        {
+          "harness": "claude",
+          "id": "f49e85bf-5c9c-d1cf-1c8c-bacbc962ec9d",
+          "title": "status-widget",
+          "status": "waiting",
+          "lastSeen": "2026-09-17T05:55:58.538Z"
+        }
+      ],
+      "git": {
+        "ahead": 0,
+        "behind": 0,
+        "dirtyFiles": 1,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T00:54:02Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/status-widget\""
+        }
+      ]
+    },
+    {
+      "id": "polly/docs-site",
+      "name": "docs-site",
+      "worktreePath": "/work/example-app-wt/docs-site",
+      "branch": "polly/docs-site",
+      "state": "uncommitted",
+      "stateLabel": "Work on your Mac only, not saved to git yet",
+      "detail": "4 changed files not committed",
+      "reviewReady": false,
+      "pr": {
+        "number": 19,
+        "url": "https://github.com/example/example-app/pull/19",
+        "title": "Docs: new site skeleton and search",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 3,
+        "behind": 0,
+        "dirtyFiles": 4,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T22:02:38Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/docs-site\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/19\""
+        }
+      ]
+    },
+    {
+      "id": "polly/plugin-api",
+      "name": "plugin-api",
+      "worktreePath": "/work/example-app-wt/plugin-api",
+      "branch": "polly/plugin-api",
+      "state": "uncommitted",
+      "stateLabel": "Work on your Mac only, not saved to git yet",
+      "detail": "4 changed files not committed",
+      "reviewReady": false,
+      "pr": {
+        "number": 21,
+        "url": "https://github.com/example/example-app/pull/21",
+        "title": "Plugins: stable API for third-party hooks",
+        "state": "OPEN"
+      },
+      "sessions": [],
+      "git": {
+        "ahead": 1,
+        "behind": 0,
+        "dirtyFiles": 4,
+        "hasUpstream": true,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T15:34:20Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/plugin-api\""
+        },
+        {
+          "label": "Open PR in browser",
+          "command": "open \"https://github.com/example/example-app/pull/21\""
+        }
+      ]
+    },
+    {
+      "id": "worktree-35b96d21",
+      "name": "worktree-35b96d21",
+      "worktreePath": "/work/example-app-wt/worktree-35b96d21",
+      "branch": "worktree-35b96d21",
+      "state": "uncommitted",
+      "stateLabel": "Work on your Mac only, not saved to git yet",
+      "detail": "1 changed file not committed",
+      "reviewReady": false,
+      "pr": null,
+      "sessions": [
+        {
+          "harness": "omnigent",
+          "id": "0e66f5a5dec27645fbd114f28dffe2c7",
+          "title": "how could we use this library here?",
+          "status": "failed",
+          "lastSeen": "2026-09-17T04:34:14.000Z"
+        }
+      ],
+      "git": {
+        "ahead": 0,
+        "behind": 0,
+        "dirtyFiles": 1,
+        "hasUpstream": false,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T00:54:02Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/worktree-35b96d21\""
+        }
+      ]
+    },
+    {
+      "id": "worktree-0280c4e3",
+      "name": "worktree-0280c4e3",
+      "worktreePath": "/work/example-app-wt/worktree-0280c4e3",
+      "branch": "worktree-0280c4e3",
+      "state": "uncommitted",
+      "stateLabel": "Work on your Mac only, not saved to git yet",
+      "detail": "1 changed file not committed",
+      "reviewReady": false,
+      "pr": null,
+      "sessions": [
+        {
+          "harness": "omnigent",
+          "id": "f8c59e53a362ac5b7d632ca8d39724fe",
+          "title": "/model sonnet",
+          "status": "running",
+          "lastSeen": "2026-09-17T05:38:41.000Z"
+        },
+        {
+          "harness": "claude",
+          "id": "e0c27e9b-1747-cb0a-a56b-2e600175ab50",
+          "title": "worktree-0280c4e3-09",
+          "status": "blocked",
+          "lastSeen": "2026-09-17T05:38:29.685Z"
+        },
+        {
+          "harness": "claude",
+          "id": "9d6fcccf-38ed-4339-63bd-e475e0779d32",
+          "title": "worktree-0280c4e3-79",
+          "status": "blocked",
+          "lastSeen": "2026-09-17T05:35:17.635Z"
+        },
+        {
+          "harness": "claude",
+          "id": "c63797f8-4665-35d0-0c99-77c7aea26799",
+          "title": "worktree-0280c4e3-d6",
+          "status": "waiting",
+          "lastSeen": "2026-09-17T05:34:03.172Z"
+        }
+      ],
+      "git": {
+        "ahead": 0,
+        "behind": 0,
+        "dirtyFiles": 1,
+        "hasUpstream": false,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T00:54:02Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/worktree-0280c4e3\""
+        }
+      ]
+    },
+    {
+      "id": "worktree-19dc20eb",
+      "name": "worktree-19dc20eb",
+      "worktreePath": "/work/example-app-wt/worktree-19dc20eb",
+      "branch": "worktree-19dc20eb",
+      "state": "active",
+      "stateLabel": "Agent working",
+      "detail": "omnigent session running, seen 15m ago",
+      "reviewReady": false,
+      "pr": null,
+      "sessions": [
+        {
+          "harness": "omnigent",
+          "id": "e5431ce4a493f124f50ead2897bc337e",
+          "title": "/model sonnet",
+          "status": "running",
+          "lastSeen": "2026-09-17T05:40:50.000Z"
+        },
+        {
+          "harness": "claude",
+          "id": "3d174a03-ba98-b6e4-3579-3c0d904904cf",
+          "title": "worktree-19dc20eb-4c",
+          "status": "blocked",
+          "lastSeen": "2026-09-17T05:39:45.754Z"
+        },
+        {
+          "harness": "claude",
+          "id": "3c342bcd-2dfa-6279-e6bf-befec6a88ea0",
+          "title": "worktree-19dc20eb-89",
+          "status": "waiting",
+          "lastSeen": "2026-09-17T05:38:21.226Z"
+        }
+      ],
+      "git": {
+        "ahead": 0,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": false,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T00:54:02Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/worktree-19dc20eb\""
+        }
+      ]
+    },
+    {
+      "id": "worktree-a0535efd",
+      "name": "worktree-a0535efd",
+      "worktreePath": "/work/example-app-wt/worktree-a0535efd",
+      "branch": "worktree-a0535efd",
+      "state": "idle",
+      "stateLabel": "Pushed, nothing waiting",
+      "detail": "fresh worktree, no commits yet",
+      "reviewReady": false,
+      "pr": null,
+      "sessions": [
+        {
+          "harness": "omnigent",
+          "id": "7c4f4e6b1a34c3ba0a073cfd67bb4fdd",
+          "title": "what do you think about this approach?",
+          "status": "idle",
+          "lastSeen": "2026-09-17T05:05:48.000Z"
+        },
+        {
+          "harness": "claude",
+          "id": "bba05db6-fffd-9009-6412-816e09541f3d",
+          "title": "worktree-a0535efd-e2",
+          "status": "blocked",
+          "lastSeen": "2026-09-17T05:05:34.697Z"
+        },
+        {
+          "harness": "claude",
+          "id": "816e0bc3-adac-e55c-8a84-9535d5324790",
+          "title": "worktree-a0535efd-bc",
+          "status": "waiting",
+          "lastSeen": "2026-09-17T05:01:26.918Z"
+        }
+      ],
+      "git": {
+        "ahead": 0,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": false,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T00:54:02Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/worktree-a0535efd\""
+        }
+      ]
+    },
+    {
+      "id": "worktree-015e5bb3",
+      "name": "worktree-015e5bb3",
+      "worktreePath": "/work/example-app-wt/worktree-015e5bb3",
+      "branch": "worktree-015e5bb3",
+      "state": "idle",
+      "stateLabel": "Pushed, nothing waiting",
+      "detail": "fresh worktree, no commits yet",
+      "reviewReady": false,
+      "pr": null,
+      "sessions": [
+        {
+          "harness": "omnigent",
+          "id": "fa66892a6992c2d5f9733ff75338a077",
+          "title": "/model sonnet",
+          "status": "idle",
+          "lastSeen": "2026-09-17T05:28:26.000Z"
+        },
+        {
+          "harness": "claude",
+          "id": "1b95dfd8-405c-45a2-0851-872cb9e9622f",
+          "title": "worktree-015e5bb3-69",
+          "status": "blocked",
+          "lastSeen": "2026-09-17T05:17:24.361Z"
+        },
+        {
+          "harness": "claude",
+          "id": "99c19d9b-2595-91f4-2b81-9ff418dbe3da",
+          "title": "worktree-015e5bb3-34",
+          "status": "waiting",
+          "lastSeen": "2026-09-17T05:16:39.499Z"
+        }
+      ],
+      "git": {
+        "ahead": 0,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": false,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T00:54:02Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/worktree-015e5bb3\""
+        }
+      ]
+    },
+    {
+      "id": "worktree-67b7a1f7",
+      "name": "worktree-67b7a1f7",
+      "worktreePath": "/work/example-app-wt/worktree-67b7a1f7",
+      "branch": "worktree-67b7a1f7",
+      "state": "idle",
+      "stateLabel": "Pushed, nothing waiting",
+      "detail": "fresh worktree, no commits yet",
+      "reviewReady": false,
+      "pr": null,
+      "sessions": [
+        {
+          "harness": "omnigent",
+          "id": "1908903841679b5c656a4911a253ddd1",
+          "title": "/model sonnet",
+          "status": "idle",
+          "lastSeen": "2026-09-17T05:07:55.000Z"
+        },
+        {
+          "harness": "claude",
+          "id": "a2c3b539-aaae-c6e6-3320-b791391aae67",
+          "title": "worktree-67b7a1f7-f9",
+          "status": "waiting",
+          "lastSeen": "2026-09-17T05:06:59.964Z"
+        }
+      ],
+      "git": {
+        "ahead": 0,
+        "behind": 0,
+        "dirtyFiles": 0,
+        "hasUpstream": false,
+        "unpushedCommits": 0,
+        "lastCommitAt": "2026-09-15T00:54:02Z"
+      },
+      "actions": [
+        {
+          "label": "Open terminal here",
+          "command": "open -a Terminal \"/work/example-app-wt/worktree-67b7a1f7\""
+        }
+      ]
+    }
+  ]
+}
