@@ -1036,6 +1036,35 @@ describe("notifier diff", () => {
     assert.equal(diffStates({ a: "idle" }, [th("a", "active")]).length, 0);
   });
 
+  test("entering active (working) never notifies, from any prior state", () => {
+    for (const from of [null, "idle", "needs-input", "needs-input:pr-ready", "blocked", "uncommitted", "unpushed", "pr-open:unreviewed", "pr-open:ready", "stale", "merged"]) {
+      const prev = from === null ? {} : { a: from };
+      assert.deepEqual(diffStates(prev, [th("a", "active")]), [], `${from} -> active should be silent`);
+    }
+    // still recorded, so the next real change diffs from "active"
+    assert.deepEqual(nextNotifiedMap([th("a", "active")]), { a: "active" });
+  });
+
+  test("leaving active still notifies exactly as before", () => {
+    const ch = diffStates({ a: "active", b: "active", c: "active" }, [th("a", "blocked"), th("b", "needs-input"), th("c", "idle")]);
+    assert.deepEqual(ch.map((c) => [c.id, c.from, c.to]), [["a", "active", "blocked"], ["b", "active", "needs-input"]]);
+  });
+
+  test("run(): a thread going blocked -> active delivers nothing (no mac notification, no notify hook)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bt-notify-working-"));
+    const snapshotFile = join(dir, "threads.json");
+    const notifiedFile = join(dir, "notified.json");
+    writeFileSync(notifiedFile, JSON.stringify({ a: "blocked", b: "needs-input:pr-ready" }));
+    writeFileSync(snapshotFile, JSON.stringify({ threads: [th("a", "active"), th("b", "active")] }));
+    const mac = [];
+    const hook = [];
+    const res = notifyRun({ snapshotFile, notifiedFile, delivery: { notify: (_t, b) => mac.push(b), hook: (l) => hook.push(l) } });
+    assert.deepEqual(res.changes, []);
+    assert.deepEqual(mac, []);
+    assert.deepEqual(hook, []);
+    assert.deepEqual(JSON.parse(readFileSync(notifiedFile, "utf8")), { a: "active", b: "active" });
+  });
+
   test("idle -> uncommitted notifies (mac only, not needs-you)", () => {
     const ch = diffStates({ a: "idle" }, [th("a", "uncommitted")]);
     assert.equal(ch.length, 1);

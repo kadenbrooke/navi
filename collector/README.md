@@ -118,9 +118,11 @@ A dormant thread that is both behind main and has uncommitted work shows as
 
 ## Notifications
 
-- Any status change → a macOS notification.
+- Any status change → a macOS notification, except a thread starting work.
 - A PR becoming **waiting on you**, or a thread going **stale** → also runs your
   `NAVI_NOTIFY_CMD`, if set (message in `"$1"`).
+- A thread starting work (→ Agent working, from any state or on first sighting) is
+  never announced — not a status that needs you.
 - An agent pausing and resuming (working ↔ nothing waiting) is never announced.
 - A row disappearing because its harness quit is never announced; if it comes
   back it is a fresh first sighting.

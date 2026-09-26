@@ -32,6 +32,12 @@ public struct TransitionDetector: Sendable {
 
     /// Latest wins when several threads change in one observation.
     public static func popState(for changes: [Change]) -> NaviState? { changes.last?.to }
+
+    /// Whether this batch of changes earns the notification sound. A thread starting to work
+    /// (anything → working, first sighting included) is not something you have to act on,
+    /// so it changes her color and pops its symbol silently. Any other change in the same
+    /// batch still chimes.
+    public static func chimes(for changes: [Change]) -> Bool { changes.contains { $0.to != .working } }
 }
 
 /// The "waiting on you" signal: a thread whose parent agent just finished a turn.

@@ -140,6 +140,8 @@ exits 0, so it cannot block a prompt. Merge these into any hooks you already hav
 
 - Several states at once → she rotates through them, one per second.
 - Any change → a symbol pops above her (`⟳` `?` `!` `✓` `zzz`); on blocked she also shakes.
+  A thread *starting* work is the exception: `⟳` pops and her color changes, but no sound
+  and no notification — it is not a status that needs you.
 - **"Working" means the parent agent is mid-turn, nothing else.** When it finishes, the row goes
   green and you get a macOS notification *"<thread> is waiting on you"* (menubar menu →
   *Notify when an agent goes idle*).

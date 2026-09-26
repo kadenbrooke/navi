@@ -54,6 +54,52 @@ final class TransitionTests: XCTestCase {
         XCTAssertEqual(TransitionDetector.popState(for: d.observe([("a", .idle)])), .idle)
     }
 
+    // MARK: chime — entering working is silent
+
+    func testEnteringWorkingNeverChimesFromAnyState() {
+        for from in NaviState.allCases where from != .working {
+            var d = TransitionDetector()
+            _ = d.observe([("a", from)])
+            let ch = d.observe([("a", .working)])
+            XCTAssertEqual(ch, [.init(id: "a", from: from, to: .working)])
+            XCTAssertFalse(TransitionDetector.chimes(for: ch), "\(from) → working must be silent")
+        }
+        // a brand-new row that appears working: silent too
+        var d = TransitionDetector()
+        _ = d.observe([("a", .idle)])
+        XCTAssertFalse(TransitionDetector.chimes(for: d.observe([("a", .idle), ("b", .working)])))
+        // several threads all starting work at once: still silent
+        _ = d.observe([("a", .idle), ("b", .idle)])
+        XCTAssertFalse(TransitionDetector.chimes(for: d.observe([("a", .working), ("b", .working)])))
+    }
+
+    func testEveryOtherTransitionStillChimes() {
+        for to in NaviState.allCases where to != .working {
+            for from in NaviState.allCases where from != to {
+                var d = TransitionDetector()
+                _ = d.observe([("a", from)])
+                XCTAssertTrue(TransitionDetector.chimes(for: d.observe([("a", to)])), "\(from) → \(to) must chime")
+            }
+        }
+    }
+
+    func testMixedBatchChimesWhenAnythingOtherThanWorkingChanged() {
+        var d = TransitionDetector()
+        _ = d.observe([("a", .idle), ("b", .working)])
+        // b now needs input while a started working (last, so it is the pop)
+        let ch = d.observe([("b", .needsInput), ("a", .working)])
+        XCTAssertEqual(TransitionDetector.popState(for: ch), .working)
+        XCTAssertTrue(TransitionDetector.chimes(for: ch))
+        XCTAssertFalse(TransitionDetector.chimes(for: []))
+    }
+
+    func testEnteringWorkingNeverRaisesAnIdleAlert() {
+        var d = TransitionDetector()
+        _ = d.observe([("a", .idle), ("b", .needsInput), ("c", .blocked)])
+        let ch = d.observe([("a", .working), ("b", .working), ("c", .working), ("n", .working)])
+        XCTAssertTrue(IdleAlert.alerts(for: ch, threads: []).isEmpty)
+    }
+
     // MARK: idle alerts — the "waiting on you" notification
 
     func testIdleAlertFiresOnlyOnWorkingToIdle() {

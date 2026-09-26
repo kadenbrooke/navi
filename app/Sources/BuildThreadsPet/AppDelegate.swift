@@ -195,7 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !changes.isEmpty {
             if sleepTimer.noteChange(now: t) { Prefs.sleeping = false }
-            if let pop = TransitionDetector.popState(for: changes) { popSym(pop) }
+            if let pop = TransitionDetector.popState(for: changes) {
+                popSym(pop, chime: TransitionDetector.chimes(for: changes))   // → working: silent pop
+            }
             // working → idle = the parent agent finished its turn: your cue.
             if Prefs.idleNotifications {
                 for alert in IdleAlert.alerts(for: changes, threads: threads) { idleNotifier.post(alert) }
@@ -257,13 +259,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: pops, sleep, wake
 
-    private func popSym(_ state: NaviState) {
+    private func popSym(_ state: NaviState, chime: Bool = true) {
         guard let state = visibility.pop(state) else { return }   // hidden: no pop, no sound, no auto-show
         let rgb = RGB(hex: state.hex(workingColor: config.params.coreColor))
         scene.bubble = SymbolBubble(state: state, rgb: rgb, at: now)
         scene.burst(state == .sleep ? 8 : 16, NaviScene.EmitOpts(speed: state == .sleep ? 30 : 100, life: 0.7, rgb: rgb))
         if state == .blocked { scene.shake = 0.4 }
-        sfx(.naviIn)                                          // the one notification sound, rate-limited in the gate
+        if chime { sfx(.naviIn) }                             // the one notification sound, rate-limited in the gate
     }
 
     private func sfx(_ id: SoundID) {

@@ -11,8 +11,9 @@
 //                      `/bin/sh -c "$NAVI_NOTIFY_CMD" navi-notify "<line>"`, so the
 //                      line is "$1" — e.g. NAVI_NOTIFY_CMD='my-pager "$1"'.
 //
-// Never notifies on active <-> idle flapping — an agent pausing and resuming
-// is not news. A row that vanishes (its harness quit) is silent too: diffStates
+// Never notifies when a thread starts working (anything -> active): that is
+// not a status that needs you. Never notifies on active <-> idle flapping
+// either — an agent pausing and resuming is not news. A row that vanishes (its harness quit) is silent too: diffStates
 // only walks the rows in the current snapshot, and notified.json forgets the
 // id, so "session ended" is never a ping and a later restart reads as a fresh
 // first sighting. The "last announced" state lives in notified.json next to
@@ -30,6 +31,11 @@ export { NOTIFIED_FILE };
 
 // Transitions between these two are noise, never announced.
 export const QUIET_STATES = new Set(["active", "idle"]);
+
+// Entering this state is never announced, whatever it came from (idle, needs-input,
+// blocked, a PR state, first sighting). It is still recorded in notified.json, so the
+// next real change diffs from it.
+export const WORKING_STATE = "active";
 
 // Entering one of these means you have to do something -> NAVI_NOTIFY_CMD too.
 // Live rows use needs-input:pr-ready (a reviewed PR waiting on the merge);
@@ -50,6 +56,8 @@ export function diffStates(prev, threads) {
 
     // First sighting of a thread that is merely working or resting: silent.
     if (before === null && QUIET_STATES.has(t.state)) continue;
+    // Starting to work is not news: silent from any prior state.
+    if (t.state === WORKING_STATE) continue;
     // Flap guard: active <-> idle in either direction.
     if (before !== null && QUIET_STATES.has(before) && QUIET_STATES.has(t.state)) continue;
 
