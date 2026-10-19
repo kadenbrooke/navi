@@ -457,6 +457,41 @@ const idleAlerts = (snapshots) => {
 };
 
 describe("daemon", () => {
+  test("stop during startup does not arm the tick timer, open the worktree watcher, or write", async () => {
+    let releaseStartup;
+    let startupEntered;
+    const startup = new Promise((resolve) => (releaseStartup = resolve));
+    const entered = new Promise((resolve) => (startupEntered = resolve));
+    const intervals = [];
+    const watches = [];
+    const h = harness({
+      watchFs: true,
+      watchFn: (dir) => {
+        watches.push(dir);
+        return { on() {}, close() {} };
+      },
+      setIntervalFn: (callback, delay) => {
+        const handle = { callback, delay };
+        intervals.push(handle);
+        return handle;
+      },
+      clearIntervalFn: (handle) => (handle.cleared = true),
+      codexFn: async () => {
+        startupEntered();
+        await startup;
+        return [];
+      },
+    });
+    const starting = h.d.start();
+    await entered;
+    h.d.stop();
+    releaseStartup();
+    await starting;
+    assert.deepEqual(intervals, [], "startup stop prevents the tick timer from arming");
+    assert.equal(watches.some((dir) => dir.endsWith(join(".git", "worktrees"))), false, "stop prevents the worktree watcher from opening");
+    assert.equal(h.snapshots.length, 0, "stop prevents a startup write");
+  });
+
   test("Omnigent parent: own status wins over the list roll-up, SSE edges flip the row", async () => {
     const h = harness({ detail: { p1: "idle" } });
     await h.d.start();
@@ -527,7 +562,7 @@ describe("daemon", () => {
     // past the grace: gone, and the source says so
     clock.advance(61);
     h.d.schedule("test");
-    await until(() => omnigentRows(h.snapshots.at(-1)).length === 0, { timeout: 2000 });
+    await until(() => omnigentRows(h.snapshots.at(-1)).length === 0);
     assert.match(h.snapshots.at(-1).sources.omnigent, /^unavailable/);
     // the daemon is still alive and reconnecting with backoff
     await until(() => h.sockets.length >= 2, { timeout: 1000 });
@@ -1320,6 +1355,7 @@ describe("tick resync", () => {
         throw new Error(`unexpected fetch ${url}`);
       },
     });
+    t.after(() => h.d.stop());
     await h.d.start();
     const sock = h.openSocket();
     await until(() => h.d.streams.has("p1"));
@@ -1331,7 +1367,6 @@ describe("tick resync", () => {
 
     // Disconnect WS. The clock stops so the collect below is inside the grace
     // however long the machine takes to run it.
-    t.after(() => h.d.stop());
     clock.freeze();
     sock.serverClose();
     await until(() => h.d.wsConnected === false);

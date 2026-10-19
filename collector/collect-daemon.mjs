@@ -345,6 +345,9 @@ export function createDaemon({
   wsConnectTimeoutMs = DAEMON.WS_CONNECT_TIMEOUT_MS,
   selfHealMs = DAEMON.SELF_HEAL_MS,
   selfHealRetryMs = DAEMON.SELF_HEAL_RETRY_MS,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+  watchFn = fsWatch,
 } = {}) {
   const wsUrl = omnigentBase.replace(/^http/, "ws") + "/v1/sessions/updates";
   const listUrl = `${omnigentBase}/v1/sessions`;
@@ -492,6 +495,7 @@ export function createDaemon({
 
   // ---- collect + write --------------------------------------------------------
   async function runCollect(reasons) {
+    if (stopped) return;
     const t0 = now();
     // Cheap path: nothing but Omnigent / usage news -> no ps, no git.
     const omnigentOnly = reasons.length > 0 && reasons.every((r) => r.startsWith("omnigent") || r === "usage" || r === "procs");
@@ -509,10 +513,14 @@ export function createDaemon({
       // The process table: awaited only when there is none yet (first run) or
       // on the tick; a Claude edge collects with the cached table right away
       // and a background refresh re-collects if the harness processes changed.
-      if (!cache.procs) await refreshProcs();
-      else if (procsDirty && !omnigentOnly) {
-        if (reasons.includes("tick") || reasons.includes("startup")) await refreshProcs();
-        else refreshProcs().catch(() => {});
+      if (!cache.procs) {
+        await refreshProcs();
+        if (stopped) return;
+      } else if (procsDirty && !omnigentOnly) {
+        if (reasons.includes("tick") || reasons.includes("startup")) {
+          await refreshProcs();
+          if (stopped) return;
+        } else refreshProcs().catch(() => {});
       }
       const omnigent = omnigentSource();
       const snapshot = await collectFn({
@@ -530,6 +538,7 @@ export function createDaemon({
         parentStatusById: parentStatus,
         resolveParentStatus: false,
       });
+      if (stopped) return;
       if (cache.codex === null) snapshot.sources.codex = "pending";
       snapshot.daemon = { reasons, ws: wsConnected ? "connected" : `down: ${wsError || "not connected yet"}`, streams: streams.size };
       writeFn(snapshot);
@@ -1141,14 +1150,14 @@ export function createDaemon({
   // checkout for sure. The dir does not exist until the first worktree is
   // added; until then the 60 s tick picks new worktrees up.
   function watchWorktreesOnce() {
-    if (worktreesWatched || !watchFs || !cache.git?.mainWorktree) return;
+    if (stopped || worktreesWatched || !watchFs || !cache.git?.mainWorktree) return;
     worktreesWatched = true;
     watchDir(join(cache.git.mainWorktree, ".git", "worktrees"), "git:worktrees", { git: true });
   }
 
   function watchDir(dir, reason, { git = false } = {}) {
     try {
-      const w = fsWatch(dir, { persistent: true }, () => {
+      const w = watchFn(dir, { persistent: true }, () => {
         if (git) gitDirty = true;
         else procsDirty = true;
         schedule(reason);
@@ -1175,15 +1184,21 @@ export function createDaemon({
         cache.codex = cache.codex || [];
         dlog(`codex: ${e?.message || e}`);
       }
+      if (stopped) return;
       // Always resync via REST regardless of WS state. During an extended WS outage,
       // the REST list is the only way to get fresh session data. On failure,
       // resyncList leaves rows alone and records the REST error; the staleness/grace
       // logic will surface "collector/omnigent down" without a misleading snapshot.
       await resyncList(reason);
+      if (stopped) return;
       await coalescer.flush(reason);
+      if (stopped) return;
       // Quota usage last and off the critical path: its fetchers talk to five
       // providers and can take tens of seconds. It lands as its own cheap collect.
-      if (usage) await refreshUsage();
+      if (usage) {
+        await refreshUsage();
+        if (stopped) return;
+      }
     })().finally(() => {
       tickInFlight = null;
     });
@@ -1218,14 +1233,15 @@ export function createDaemon({
     }
     connectWs();
     await tick("startup");
-    tickTimer = setInterval(() => {
+    if (stopped) return;
+    tickTimer = setIntervalFn(() => {
       tick().catch((e) => log(`tick failed: ${e?.message || e}`));
     }, tickMs);
   }
 
   function stop() {
     stopped = true;
-    if (tickTimer) clearInterval(tickTimer);
+    if (tickTimer) clearIntervalFn(tickTimer);
     if (wsTimer) clearTimeout(wsTimer);
     if (wsConnectTimer) clearTimeout(wsConnectTimer);
     if (graceTimer) clearTimeout(graceTimer);
