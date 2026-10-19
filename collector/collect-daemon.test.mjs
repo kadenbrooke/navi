@@ -3,7 +3,7 @@
 // Daemon tests: every socket, stream, fetch and fork is a fake handed to
 // createDaemon. Nothing here touches the live Omnigent server, git, or gh.
 
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { createServer } from "node:net";
@@ -335,6 +335,25 @@ class FakeSocket {
   }
 }
 
+// Every daemon a test starts is stopped when the file ends, so a failed
+// assertion before a test's own stop() cannot leave timers or watchers running
+// and keep this test process alive. stop() is idempotent.
+const liveDaemons = new Set();
+after(() => {
+  for (const d of liveDaemons) d.stop();
+});
+
+// A clock that follows real time until a test freezes it; then only the test
+// moves it. Grace-window assertions use it so a loaded machine cannot push a
+// debounced collect past a 60 ms window.
+const freezableClock = () => {
+  const c = { frozen: null };
+  c.now = () => c.frozen ?? Date.now();
+  c.freeze = () => (c.frozen = Date.now());
+  c.advance = (ms) => (c.frozen += ms);
+  return c;
+};
+
 function harness({ list = [listItem()], detail = {}, debounceMs = 20, graceMs = 60, initialBaselineHoldMs = 1000, ...over } = {}) {
   const home = mkdtempSync(join(tmpdir(), "bt-home-"));
   mkdirSync(join(home, ".claude", "sessions"), { recursive: true });
@@ -404,6 +423,7 @@ function harness({ list = [listItem()], detail = {}, debounceMs = 20, graceMs = 
     notifyFn: () => {},
     ...over,
   });
+  liveDaemons.add(d);
   const openSocket = () => {
     const s = sockets.at(-1);
     s.readyState = 1; // OPEN
@@ -484,22 +504,29 @@ describe("daemon", () => {
     h.d.stop();
   });
 
-  test("Omnigent down: rows survive the grace window, then drop; nothing fake stays live", async () => {
+  test("Omnigent down: rows survive the grace window, then drop; nothing fake stays live", async (t) => {
     // lastKnownMs 0: the last-known hold is off here; its own tests are below.
-    const h = harness({ detail: { p1: "running" }, lastKnownMs: 0 });
+    // The REST fallback poll is pushed out so a degraded-mode refresh cannot
+    // keep the rows fresh; its own tests are below too.
+    const clock = freezableClock();
+    const h = harness({ detail: { p1: "running" }, lastKnownMs: 0, outagePollMs: 60_000, now: clock.now });
+    t.after(() => h.d.stop());
     await h.d.start();
     const sock = h.openSocket();
     await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
 
+    clock.freeze();
     sock.serverClose(); // server went away
     assert.equal(h.d.wsConnected, false);
     assert.equal(h.streams.size, 0, "parent streams are torn down with the socket");
-    // inside the grace: the last-good row is still there
+    // inside the grace (no clock time has passed): the last-good row is still there
     h.d.schedule("test");
     const n = h.snapshots.length;
     await until(() => h.snapshots.length > n);
     assert.equal(omnigentRows(h.snapshots.at(-1)).length, 1);
     // past the grace: gone, and the source says so
+    clock.advance(61);
+    h.d.schedule("test");
     await until(() => omnigentRows(h.snapshots.at(-1)).length === 0, { timeout: 2000 });
     assert.match(h.snapshots.at(-1).sources.omnigent, /^unavailable/);
     // the daemon is still alive and reconnecting with backoff
@@ -823,7 +850,7 @@ test("collect() turns a last-known / failed Omnigent source into omnigentFeed fo
     child: false,
     parentId: null,
   };
-  const base = { repo: "/nowhere", home, usage: false, herdr: false, resolveParentStatus: false };
+  const base = { repo: "/nowhere", home, usage: false, resolveParentStatus: false };
   const held = await collect({
     ...base,
     sources: { git, procs: new Map(), codex: [], omnigent: { sessions: [session], runners: "ok", lastKnown: { since: "2026-10-17T10:00:00.000Z", reason: "fetch failed" } } },
@@ -1267,11 +1294,14 @@ describe("tick resync", () => {
     await Promise.all([first, second]);
   });
 
-  test("tick resyncs the list via REST even while WS is disconnected", async () => {
+  test("tick resyncs the list via REST even while WS is disconnected", async (t) => {
+    const clock = freezableClock();
     let listCallCount = 0;
     const detailData = { p1: "running", p2: "running" };
     let listData = [listItem({ id: "p1" })];
     const h = harness({
+      now: clock.now,
+      outagePollMs: 60_000,
       detail: detailData,
       list: listData,
       fetchJson: async (url) => {
@@ -1299,7 +1329,10 @@ describe("tick resync", () => {
     // listCallCount is 2 here (startup resync + ws-open resync)
     assert.equal(listCallCount, 2);
 
-    // Disconnect WS
+    // Disconnect WS. The clock stops so the collect below is inside the grace
+    // however long the machine takes to run it.
+    t.after(() => h.d.stop());
+    clock.freeze();
     sock.serverClose();
     await until(() => h.d.wsConnected === false);
     // Trigger a collect while WS is down (within grace period)

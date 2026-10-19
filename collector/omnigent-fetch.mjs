@@ -50,17 +50,20 @@ function wait(ms) {
  * creation and response headers; it is not evidence that the daemon's HTTP
  * runtime is healthy. Non-2xx responses are not retried and retain their HTTP
  * status in the error.
+ *
+ * `now` and `sleep` are injectable so tests can drive the deadline and the retry
+ * delay on a fake clock instead of racing real timers.
  */
-export async function fetchOmnigentJson(url, timeoutMs, { fetchImpl = fetch } = {}) {
+export async function fetchOmnigentJson(url, timeoutMs, { fetchImpl = fetch, now = Date.now, sleep = wait } = {}) {
   let lastError;
   const timeout = Number(timeoutMs);
   if (!Number.isFinite(timeout) || timeout <= 0) {
     const error = new Error(`omnigent fetch timeout: timeoutMs must be > 0 (got ${timeoutMs})`);
     throw new Error(formatOmnigentFetchError(error, url), { cause: error });
   }
-  const deadline = Date.now() + (Number.isFinite(timeout) ? Math.max(0, timeout) : 0);
+  const deadline = now() + (Number.isFinite(timeout) ? Math.max(0, timeout) : 0);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const remaining = deadline - Date.now();
+    const remaining = deadline - now();
     if (remaining <= 0) break;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), remaining);
@@ -74,9 +77,9 @@ export async function fetchOmnigentJson(url, timeoutMs, { fetchImpl = fetch } = 
     } catch (error) {
       lastError = error;
       if (attempt === 0 && isRetryable(error)) {
-        const delay = Math.min(RETRY_DELAY_MS, Math.max(0, deadline - Date.now()));
+        const delay = Math.min(RETRY_DELAY_MS, Math.max(0, deadline - now()));
         if (delay <= 0) break;
-        await wait(delay);
+        await sleep(delay);
         continue;
       }
       throw new Error(formatOmnigentFetchError(error, url), { cause: error });

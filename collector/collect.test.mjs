@@ -973,32 +973,52 @@ describe("omnigent sessions — fixture-driven", () => {
 });
 
 describe("omnigent REST fetch diagnostics and recovery", () => {
+  // A fake clock: the deadline and the retry delay run on it, so no assertion
+  // depends on how fast the machine schedules real timers.
+  const fakeClock = () => {
+    const clock = { t: 1_000_000, sleeps: [] };
+    clock.now = () => clock.t;
+    clock.sleep = async (ms) => {
+      clock.sleeps.push(ms);
+      clock.t += ms;
+    };
+    return clock;
+  };
+  const socketError = (message, code) => {
+    const error = new TypeError("fetch failed");
+    error.cause = Object.assign(new Error(message), { code });
+    return error;
+  };
+
   test("retries a transient dead pooled socket and decodes the successful response", async () => {
+    const clock = fakeClock();
     let calls = 0;
     const result = await fetchOmnigentJson("http://127.0.0.1:6767/v1/sessions?limit=200", 100, {
+      now: clock.now,
+      sleep: clock.sleep,
       fetchImpl: async () => {
         calls++;
-        if (calls === 1) {
-          const error = new TypeError("fetch failed");
-          error.cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
-          throw error;
-        }
+        if (calls === 1) throw socketError("other side closed", "UND_ERR_SOCKET");
         return new Response(JSON.stringify({ data: [{ id: "s1" }] }), { status: 200 });
       },
     });
     assert.equal(calls, 2);
+    assert.deepEqual(clock.sleeps, [50], "one bounded retry delay");
     assert.deepEqual(result.data, [{ id: "s1" }]);
   });
 
   test("includes the request and Node fetch cause when both attempts fail", async () => {
+    const clock = fakeClock();
     const url = "http://127.0.0.1:6767/v1/sessions?limit=200";
+    let calls = 0;
     await assert.rejects(
       () =>
         fetchOmnigentJson(url, 100, {
+          now: clock.now,
+          sleep: clock.sleep,
           fetchImpl: async () => {
-            const error = new TypeError("fetch failed");
-            error.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:6767"), { code: "ECONNREFUSED" });
-            throw error;
+            calls++;
+            throw socketError("connect ECONNREFUSED 127.0.0.1:6767", "ECONNREFUSED");
           },
         }),
       (error) => {
@@ -1007,26 +1027,27 @@ describe("omnigent REST fetch diagnostics and recovery", () => {
         return true;
       },
     );
+    assert.equal(calls, 2, "both attempts ran");
   });
 
   test("uses one total deadline across both retry attempts", async () => {
+    const clock = fakeClock();
     let calls = 0;
-    const started = Date.now();
     await assert.rejects(
       () =>
         fetchOmnigentJson("http://127.0.0.1:6767/v1/sessions", 100, {
+          now: clock.now,
+          sleep: clock.sleep,
           fetchImpl: async () => {
             calls++;
-            await new Promise((resolve) => setTimeout(resolve, 70));
-            const error = new TypeError("fetch failed");
-            error.cause = Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" });
-            throw error;
+            clock.t += 70; // the attempt itself takes 70 of the 100 ms
+            throw socketError("socket closed", "UND_ERR_SOCKET");
           },
         }),
       /fetch failed/,
     );
+    assert.deepEqual(clock.sleeps, [30], "the retry delay is cut to what is left of the deadline");
     assert.equal(calls, 1, "the retry deadline expired before a second attempt");
-    assert.ok(Date.now() - started < 150, "the retry must not get a fresh timeout window");
   });
 
   test("does not retry abort/timeout errors or HTTP 5xx responses", async () => {
@@ -1034,10 +1055,13 @@ describe("omnigent REST fetch diagnostics and recovery", () => {
       Object.assign(new DOMException("The operation was aborted", "AbortError"), { cause: { code: "ABORT_ERR" } }),
       Object.assign(new Error("omnigent HTTP 503 Service Unavailable"), { status: 503 }),
     ]) {
+      const clock = fakeClock();
       let calls = 0;
       await assert.rejects(
         () =>
           fetchOmnigentJson("http://127.0.0.1:6767/v1/sessions", 100, {
+            now: clock.now,
+            sleep: clock.sleep,
             fetchImpl: async () => {
               calls++;
               if (failure.status) return new Response("down", { status: failure.status });
@@ -1046,6 +1070,7 @@ describe("omnigent REST fetch diagnostics and recovery", () => {
           }),
       );
       assert.equal(calls, 1);
+      assert.deepEqual(clock.sleeps, []);
     }
   });
 
