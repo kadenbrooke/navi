@@ -8,7 +8,7 @@ enum Prefs {
 
     /// The whole Navi config as one JSON blob in the mock's Share-box shape
     /// (`{ preset, mode, menuSort, params }`). Paste the playground's JSON here via the
-    /// menubar → "Paste Navi config from clipboard".
+    /// menubar → Advanced → "Paste look & behaviour settings".
     static var config: NaviConfig {
         get {
             guard let s = d.string(forKey: "naviConfig"), let c = try? NaviConfig.decode(Data(s.utf8)) else { return NaviConfig() }
@@ -26,6 +26,17 @@ enum Prefs {
         get { d.bool(forKey: openChatsInBrowserKey) }
         set { d.set(newValue, forKey: openChatsInBrowserKey) }
     }
+
+    /// Which terminal a worktree row opens in: `auto` (unset; iTerm when installed, else
+    /// Terminal), `iTerm` or `Terminal`. `defaults write dev.navi.pet terminalApp Terminal`.
+    static let terminalAppPreference = "terminalApp"
+    static var terminalApp: TerminalApp {
+        TerminalApp.resolve(pref: d.string(forKey: terminalAppPreference),
+                            iTermInstalled: NSWorkspace.shared.urlForApplication(withBundleIdentifier: TerminalApp.iTermBundleID) != nil)
+    }
+
+    /// Where a click on a thread row opens things (both menus, same answer).
+    static var openPrefs: OpenPrefs { OpenPrefs(chatsInBrowser: openChatsInBrowser, terminal: terminalApp) }
 
     /// macOS user notification when a thread's parent agent goes working → idle ("<name> is
     /// waiting on you"). Default ON; stored inverted so an unset key reads as on.

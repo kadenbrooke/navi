@@ -58,9 +58,31 @@ collect is written with temp-file + rename, so Navi never reads a half-written
 file. WS and SSE reconnect with capped exponential backoff (1 s → 30 s).
 
 **Omnigent down.** The socket drops; the last-good chat rows stay for a 20 s
-grace (a server restart does not flash every row away), then the `omnigent`
-source is reported unavailable and its rows are **dropped** — never kept alive
-from memory. They return on reconnect. Git / Claude / Codex rows are unaffected.
+grace (a server restart does not flash every row away; a working REST poll
+keeps them fresh). When WS and REST are both past the grace, the last rows
+Omnigent reported stay for `OMNIGENT_LAST_KNOWN_MS` (5 min) more, frozen and
+flagged: `omnigentFeed: { status: "last-known", since, error }` and
+`sources.omnigent = "last-known: …"`, so Navi says "showing last known" instead
+of a false "0 threads". The clock runs from the last time Omnigent actually
+sent row data (a successful REST list, or a `snapshot` / `changed` / `removed`
+WS frame); heartbeats, unknown frames, reconnects and closes never move it.
+Liveness is separate: a connected socket that has delivered data is current
+even when silent (the feed is event-driven), and its close buys only the 20 s
+grace, never a later last-known deadline. Past that every cached Omnigent row and parent status is
+**dropped**, `omnigentFeed.status` is `unavailable`, and nothing comes back
+until Omnigent sends data again (a reconnect alone is not enough). Git / Claude / Codex rows are unaffected. Why 5 min: an Omnigent
+restart or a loaded Mac timing out the poll recovers well inside it, and past
+it a frozen "working" row is more likely wrong than right.
+
+**Self-recovery.** A WebSocket that has not opened within `WS_CONNECT_TIMEOUT_MS`
+(15 s) is torn down and retried on the normal backoff, so a stuck connect cannot
+wedge the feed. REST errors keep their real cause (`fetch failed; cause:
+ECONNREFUSED: … [GET http://127.0.0.1:6767/v1/sessions…]`) in the log and the
+snapshot, and a transient socket error gets one retry inside the same deadline.
+When WS and REST have both been failing for `SELF_HEAL_MS` (5 min), the daemon
+probes Omnigent's TCP port. Reachable, and one more REST list still fails: the
+daemon's own HTTP/WS state is broken, so it exits 1 and launchd restarts it.
+Unreachable: Omnigent itself is down, so it keeps waiting and re-checks every 30 s.
 
 **Parent-only status.** Omnigent's list feed rolls
 sub-agents up into the parent's status — a parent reads `running` while any
@@ -99,7 +121,10 @@ Omnigent-backed rows carry two links: `omnigentUrl` (web UI,
 `http://127.0.0.1:6767/c/<id>`) and `omnigentDeepLink` (desktop app,
 `omnigent://localhost:6767/c/<id>`, port required). Both derive from the one
 `OMNIGENT_BASE` in `collect.mjs`; the deep link leads the row's actions as
-"Open chat in Omnigent", the web url follows as "Open chat in browser".
+"Open chat in Omnigent", the web url follows as "Open chat in browser". Navi
+relabels them where they open (`Open in Omnigent` via `open -b
+ai.omnigent.desktop`, `Open in iTerm` / `Open in Terminal` for the worktree;
+PetCore `BuildThread.actions(_:)`).
 
 Dormant rows (`dormant[]` in the JSON — worktrees and PRs with nobody live on them; Navi does not show these):
 

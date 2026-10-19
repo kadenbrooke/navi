@@ -15,14 +15,14 @@ final class LivenessTests: XCTestCase {
                                       ThreadAction(label: "Open chat in browser", command: "open \"\(web)\"")],
                             omnigentUrl: web, omnigentDeepLink: deep)
         XCTAssertTrue(t.isOmnigentChat)
-        XCTAssertEqual(t.primaryAction?.command, "open \"\(deep)\"")
-        XCTAssertEqual(t.primaryAction?.label, "Open chat in Omnigent")
-        XCTAssertEqual(t.primaryAction(openChatsInBrowser: false)?.command, "open \"\(deep)\"")
+        XCTAssertEqual(t.primaryAction?.argv, ["/usr/bin/open", "-b", "ai.omnigent.desktop", deep], "explicitly the desktop app")
+        XCTAssertEqual(t.primaryAction?.label, "Open in Omnigent")
+        XCTAssertEqual(t.primaryAction(openChatsInBrowser: false)?.argv, ["/usr/bin/open", "-b", "ai.omnigent.desktop", deep])
     }
 
     func testOpenChatsInBrowserPrefSwitchesToTheWebURL() {
         let t = BuildThread(id: "omnigent:\(id)", name: "chat", state: .idle, omnigentUrl: web, omnigentDeepLink: deep)
-        XCTAssertEqual(t.primaryAction(openChatsInBrowser: true)?.command, "open \"\(web)\"")
+        XCTAssertEqual(t.primaryAction(openChatsInBrowser: true)?.argv, ["/usr/bin/open", web])
         XCTAssertEqual(t.primaryAction(openChatsInBrowser: true)?.label, "Open chat in browser")
     }
 
@@ -33,7 +33,7 @@ final class LivenessTests: XCTestCase {
                             pr: PullRequest(number: 7, url: "https://github.com/x/y/pull/7"),
                             actions: [term, pr, ThreadAction(label: "Open chat in Omnigent", command: "open \"\(deep)\"")],
                             omnigentUrl: web, omnigentDeepLink: deep)
-        XCTAssertEqual(t.primaryAction?.command, "open \"\(deep)\"", "chat wins; PR and terminal stay in the context menu")
+        XCTAssertEqual(t.primaryAction?.argv, ["/usr/bin/open", "-b", "ai.omnigent.desktop", deep], "chat wins; PR and terminal stay in the context menu")
         XCTAssertTrue((t.actions ?? []).contains(pr) && (t.actions ?? []).contains(term), "context menu keeps them")
     }
 
@@ -43,10 +43,13 @@ final class LivenessTests: XCTestCase {
         let withPR = BuildThread(id: "a", name: "a", worktreePath: "/wt", state: .prOpen,
                                  pr: PullRequest(number: 7, url: "https://github.com/x/y/pull/7"), actions: [term, pr])
         XCTAssertFalse(withPR.isOmnigentChat)
-        XCTAssertEqual(withPR.primaryAction, pr)
+        XCTAssertEqual(withPR.primaryAction?.label, "Open PR in browser")
+        XCTAssertEqual(withPR.primaryAction?.argv, ["/usr/bin/open", "https://github.com/x/y/pull/7"])
         let noPR = BuildThread(id: "b", name: "b", worktreePath: "/wt", state: .active, actions: [term])
-        XCTAssertEqual(noPR.primaryAction, term)
-        XCTAssertEqual(noPR.primaryAction(openChatsInBrowser: true), term, "the pref only affects Omnigent rows")
+        let inTerminal = ThreadAction(label: "Open in Terminal", command: "open -a Terminal /wt", argv: ["/usr/bin/open", "-a", "Terminal", "/wt"])
+        XCTAssertEqual(noPR.primaryAction, inTerminal)
+        XCTAssertEqual(noPR.primaryAction(openChatsInBrowser: true), inTerminal, "the pref only affects Omnigent rows")
+        XCTAssertEqual(noPR.primaryAction(OpenPrefs(terminal: .iTerm))?.argv, ["/usr/bin/open", "-a", "iTerm", "/wt"])
         let codex = BuildThread(id: "codex:1", name: "c", state: .idle, actions: [ThreadAction(label: "Catch up with main", command: "git pull --rebase origin main")])
         XCTAssertEqual(codex.primaryAction?.command, "git pull --rebase origin main")
         XCTAssertNil(BuildThread(id: "d", name: "d", state: .idle).primaryAction)
@@ -59,7 +62,7 @@ final class LivenessTests: XCTestCase {
         XCTAssertNil(BuildThread.deepLink(fromWebURL: "https://github.com/x/y/pull/7"), "not a chat url")
         // no omnigentDeepLink, no http action either → derived from omnigentUrl alone
         let t = BuildThread(id: "omnigent:\(id)", name: "chat", state: .idle, omnigentUrl: web)
-        XCTAssertEqual(t.primaryAction?.command, "open \"\(deep)\"")
+        XCTAssertEqual(t.primaryAction?.argv, ["/usr/bin/open", "-b", "ai.omnigent.desktop", deep])
     }
 
     // MARK: idle rows (task d)

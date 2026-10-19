@@ -46,6 +46,7 @@ import {
   collectGitSources,
 } from "./collect.mjs";
 import { diffStates, deliver, nextNotifiedMap, run as notifyRun } from "./notify.mjs";
+import { fetchOmnigentJson } from "./omnigent-fetch.mjs";
 
 const NOW = Date.parse("2026-09-17T12:00:00Z");
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -968,6 +969,91 @@ describe("omnigent sessions — fixture-driven", () => {
       url.endsWith("/v1/runners") ? fixture.runners : { data: pages[0].data, has_more: true, last_id: pages[0].last_id };
     const out = await collectOmnigent("http://127.0.0.1:6767/v1/sessions", { fetchJson: fj });
     assert.equal(out.length, 4);
+  });
+});
+
+describe("omnigent REST fetch diagnostics and recovery", () => {
+  test("retries a transient dead pooled socket and decodes the successful response", async () => {
+    let calls = 0;
+    const result = await fetchOmnigentJson("http://127.0.0.1:6767/v1/sessions?limit=200", 100, {
+      fetchImpl: async () => {
+        calls++;
+        if (calls === 1) {
+          const error = new TypeError("fetch failed");
+          error.cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+          throw error;
+        }
+        return new Response(JSON.stringify({ data: [{ id: "s1" }] }), { status: 200 });
+      },
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(result.data, [{ id: "s1" }]);
+  });
+
+  test("includes the request and Node fetch cause when both attempts fail", async () => {
+    const url = "http://127.0.0.1:6767/v1/sessions?limit=200";
+    await assert.rejects(
+      () =>
+        fetchOmnigentJson(url, 100, {
+          fetchImpl: async () => {
+            const error = new TypeError("fetch failed");
+            error.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:6767"), { code: "ECONNREFUSED" });
+            throw error;
+          },
+        }),
+      (error) => {
+        assert.match(error.message, /fetch failed; cause: ECONNREFUSED: connect ECONNREFUSED/);
+        assert.match(error.message, /\[GET http:\/\/127\.0\.0\.1:6767\/v1\/sessions\?limit=200\]/);
+        return true;
+      },
+    );
+  });
+
+  test("uses one total deadline across both retry attempts", async () => {
+    let calls = 0;
+    const started = Date.now();
+    await assert.rejects(
+      () =>
+        fetchOmnigentJson("http://127.0.0.1:6767/v1/sessions", 100, {
+          fetchImpl: async () => {
+            calls++;
+            await new Promise((resolve) => setTimeout(resolve, 70));
+            const error = new TypeError("fetch failed");
+            error.cause = Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" });
+            throw error;
+          },
+        }),
+      /fetch failed/,
+    );
+    assert.equal(calls, 1, "the retry deadline expired before a second attempt");
+    assert.ok(Date.now() - started < 150, "the retry must not get a fresh timeout window");
+  });
+
+  test("does not retry abort/timeout errors or HTTP 5xx responses", async () => {
+    for (const failure of [
+      Object.assign(new DOMException("The operation was aborted", "AbortError"), { cause: { code: "ABORT_ERR" } }),
+      Object.assign(new Error("omnigent HTTP 503 Service Unavailable"), { status: 503 }),
+    ]) {
+      let calls = 0;
+      await assert.rejects(
+        () =>
+          fetchOmnigentJson("http://127.0.0.1:6767/v1/sessions", 100, {
+            fetchImpl: async () => {
+              calls++;
+              if (failure.status) return new Response("down", { status: failure.status });
+              throw failure;
+            },
+          }),
+      );
+      assert.equal(calls, 1);
+    }
+  });
+
+  test("rejects a non-positive timeout with a clear diagnostic", async () => {
+    await assert.rejects(
+      () => fetchOmnigentJson("http://127.0.0.1:6767/v1/sessions", 0, { fetchImpl: async () => new Response("ok") }),
+      /omnigent fetch timeout: timeoutMs must be > 0 \(got 0\).*\[GET http:\/\/127\.0\.0\.1:6767\/v1\/sessions\]/,
+    );
   });
 });
 

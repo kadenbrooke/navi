@@ -5,8 +5,8 @@ import ServiceManagement
 import PetCore
 
 /// Glue: collector snapshot → Navi states → color engine / symbol pops / sleep / menu rows,
-/// plus the 60 fps tick that moves the panel, the menubar Triforce (left-click hide/show,
-/// right-click menu) and the ⌥⌘P / ⌥⌘N hotkeys.
+/// plus the 60 fps tick that moves the panel, the menubar Triforce (any click opens the
+/// dropdown: threads, usage, then show/hide and settings) and the ⌥⌘P / ⌥⌘N hotkeys.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let scene = NaviScene()
     private var panel: PetPanel!
@@ -33,6 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Collector liveness (CollectorHealth.staleAfter). Re-checked on every snapshot and on a
     /// timer, because a file that stops changing never triggers the store's onChange.
     private var health: CollectorHealth = .missing
+    /// Omnigent feed behind the chat rows (collector's `omnigentFeed`). Fine unless the
+    /// collector says its rows are last-known or missing.
+    private var feed: OmnigentFeed = .ok
+    private var feedRecovery = FeedRecovery()
     private var healthTimer: Timer?
     private let idleNotifier = IdleNotifier()
 
@@ -82,8 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         link?.add(to: .main, forMode: .common)
 
         // Dev hook for screenshots: NAVI_OPEN_MENU=1 opens the menu right away;
-        // NAVI_OPEN_MENU=usage opens it on the last (quota usage) page.
+        // NAVI_OPEN_MENU=usage opens it on the last (quota usage) page, =menubar opens the
+        // menubar Triforce's dropdown.
         let openMenuEnv = ProcessInfo.processInfo.environment["NAVI_OPEN_MENU"]
+        if openMenuEnv == "menubar" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.statusItem.button?.performClick(nil) }
+        }
         if openMenuEnv == "1" || openMenuEnv == "usage" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.openMenu()
@@ -180,8 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Stale / missing: everything in the file is history. No threads, no live states —
         // never present a dead collector's sessions as live.
         threads = health.isLive ? (snap?.threads ?? []) : []
+        feed = health.isLive ? OmnigentFeed.of(snap) : .ok
         let states = threads.map { ($0.id, NaviStateMapper.state(for: $0)) }
-        let changes = transitions.observe(states.map { (id: $0.0, state: $0.1) })
+        // Chats coming back after the feed was unavailable are not new: no pop, no chime.
+        let changes = feedRecovery.filter(transitions.observe(states.map { (id: $0.0, state: $0.1) }), feed: feed, threads: threads)
         for c in changes { changedAt[c.id] = wall }
         // first-seen threads: fall back to the last commit time so "recent" has an order on launch
         for th in threads where changedAt[th.id] == nil {
@@ -223,6 +233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                changedAt: recency, status: status, idle: th.idle ?? false)
             }
         }
+        menu.openPrefs = Prefs.openPrefs
+        menu.feed = feed
         menu.setRows(rows, threads: threads)
     }
 
@@ -336,7 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSWorkspace.shared.activateFileViewerSelecting([Paths.threadsJSON.deletingLastPathComponent()])
             return
         }
-        guard let thread, let action = thread.primaryAction(openChatsInBrowser: Prefs.openChatsInBrowser) else { return }
+        guard let thread, let action = thread.primaryAction(Prefs.openPrefs) else { return }
         ActionRunner.run(action, for: thread)
     }
 
@@ -351,52 +363,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snd.target = self; snd.state = config.params.sound ? .on : .off
         m.addItem(snd)
         m.addItem(idleNotifyItem())
-        m.addItem(withTitle: "Open threads.json", action: #selector(openThreadsJSON), keyEquivalent: "").target = self
+        m.addItem(.separator())
+        m.addItem(advancedItem())
         m.addItem(.separator())
         m.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "").target = self
         NSMenu.popUpContextMenu(m, with: event, for: view)
     }
 
-    /// Left-click = hide/show, right-click (or ctrl-click) = the menu. `statusItem.menu` is
-    /// only assigned for the duration of the right-click; left permanently set, AppKit would
-    /// open the menu on every click and the button action would never fire.
+    /// Any click on the Triforce (left, right, ctrl) opens the dropdown: `statusItem.menu`
+    /// stays assigned, so AppKit opens it natively on mouse-down. It never toggles Navi's
+    /// visibility — that is the *Show/Hide Navi* item and ⌥⌘N.
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusMenu = NSMenu()
         statusMenu.delegate = self
-        if let b = statusItem.button {
-            b.target = self
-            b.action = #selector(statusItemClicked)
-            b.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        }
+        // Info rows (usage) have no action but must not draw greyed out.
+        statusMenu.autoenablesItems = false
+        statusItem.menu = statusMenu
         refreshStatusIcon()
     }
 
-    @objc private func statusItemClicked() {
-        let e = NSApp.currentEvent
-        let rightish = e?.type == .rightMouseUp || (e?.modifierFlags.contains(.control) ?? false)
-        if rightish {
-            statusItem.menu = statusMenu
-            statusItem.button?.performClick(nil)
-            statusItem.menu = nil
-        } else {
-            toggleHidden()
-        }
-    }
-
+    /// Rebuilt on every open from the same data Navi's own menu reads (MenuController's
+    /// MenuModel and its usage rows), so it is live whether she is shown,
+    /// hidden or asleep.
     func menuNeedsUpdate(_ m: NSMenu) {
+        guard m === statusMenu else { return }
         m.removeAllItems()
-        let hide = NSMenuItem(title: visibility.hidden ? "Show Navi" : "Hide Navi", action: #selector(menuToggleHidden), keyEquivalent: "n")
-        hide.keyEquivalentModifierMask = [.command, .option]
-        hide.target = self
-        m.addItem(hide)
-        let toggle = NSMenuItem(title: sleepTimer.sleeping ? "Wake Navi" : "Sleep Navi", action: #selector(menuToggleSleep), keyEquivalent: "p")
-        toggle.keyEquivalentModifierMask = [.command, .option]
-        toggle.target = self
-        m.addItem(toggle)
+        menu.close(silent: true)
+        refreshMenuRows()
+        let now = Date()
+        let model = menu.model
+
         let status = NSMenuItem(title: statusSummary(), action: nil, keyEquivalent: ""); status.isEnabled = false
         m.addItem(status)
         m.addItem(.separator())
+        let render: ([MenubarDropdown.Item]) -> [NSMenuItem] = { [unowned self] items in
+            StatusMenuRenderer.items(items, target: self, onThread: #selector(self.dropdownOpenThread(_:)))
+        }
+        for item in render(MenubarDropdown.threadSection(model, workingColor: config.params.coreColor, threads: threads,
+                                                         prefs: Prefs.openPrefs, feed: feed, now: now)) { m.addItem(item) }
+        m.addItem(.separator())
+
+        let usage = NSMenu(); usage.autoenablesItems = false
+        for item in render(MenubarDropdown.usageSection(model, hasUsageData: menu.hasUsageData, polledAt: menu.usagePolledAt, now: now)) { usage.addItem(item) }
+        let usageItem = NSMenuItem(title: MenubarDropdown.usageTitle(model), action: nil, keyEquivalent: "")
+        usageItem.submenu = usage
+        m.addItem(usageItem)
+
+        m.addItem(.separator())
+
+        let hide = NSMenuItem(title: MenubarDropdown.visibilityTitle(hidden: visibility.hidden), action: #selector(menuToggleHidden), keyEquivalent: "n")
+        hide.keyEquivalentModifierMask = [.command, .option]
+        hide.target = self
+        m.addItem(hide)
+        let toggle = NSMenuItem(title: MenubarDropdown.sleepTitle(sleeping: sleepTimer.sleeping), action: #selector(menuToggleSleep), keyEquivalent: "p")
+        toggle.keyEquivalentModifierMask = [.command, .option]
+        toggle.target = self
+        m.addItem(toggle)
+        m.addItem(.separator())
+        m.addItem(.sectionHeader(title: "Settings"))
         let snd = NSMenuItem(title: "Sound", action: #selector(toggleSound), keyEquivalent: "")
         snd.target = self; snd.state = config.params.sound ? .on : .off
         m.addItem(snd)
@@ -408,17 +433,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             m.addItem(miss)
         }
         m.addItem(.separator())
-        m.addItem(withTitle: "Paste Navi config from clipboard", action: #selector(pasteConfig), keyEquivalent: "").target = self
-        m.addItem(withTitle: "Copy Navi config", action: #selector(copyConfig), keyEquivalent: "").target = self
-        m.addItem(withTitle: "Reset Navi config", action: #selector(resetConfig), keyEquivalent: "").target = self
-        m.addItem(.separator())
         let browser = NSMenuItem(title: "Open chats in browser", action: #selector(toggleOpenChatsInBrowser), keyEquivalent: "")
         browser.target = self; browser.state = Prefs.openChatsInBrowser ? .on : .off
         browser.toolTip = "Off: a click on a chat row opens it in the Omnigent desktop app (omnigent://). On: the web UI."
         m.addItem(browser)
-        m.addItem(.separator())
-        m.addItem(withTitle: "Open threads.json", action: #selector(openThreadsJSON), keyEquivalent: "").target = self
-        m.addItem(withTitle: "Open sfx folder", action: #selector(openSfxFolder), keyEquivalent: "").target = self
         m.addItem(.separator())
         let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         login.target = self
@@ -429,21 +447,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         m.addItem(login)
         m.addItem(.separator())
+        m.addItem(advancedItem())
+        m.addItem(.separator())
         m.addItem(withTitle: "Quit Navi", action: #selector(quit), keyEquivalent: "q").target = self
     }
 
+    /// Developer tools, one level down in both menus (the dropdown and Navi's right-click).
+    private func advancedItem() -> NSMenuItem {
+        typealias A = MenubarDropdown.Advanced
+        let sub = NSMenu(); sub.autoenablesItems = false
+        sub.addItem(withTitle: A.openDataFolder, action: #selector(openStatusDataFolder), keyEquivalent: "").target = self
+        sub.addItem(withTitle: A.openSoundsFolder, action: #selector(openSfxFolder), keyEquivalent: "").target = self
+        sub.addItem(.separator())
+        sub.addItem(withTitle: A.copySettings, action: #selector(copyConfig), keyEquivalent: "").target = self
+        sub.addItem(withTitle: A.pasteSettings, action: #selector(pasteConfig), keyEquivalent: "").target = self
+        sub.addItem(withTitle: A.resetSettings, action: #selector(resetConfig), keyEquivalent: "").target = self
+        let item = NSMenuItem(title: A.title, action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
     private func statusSummary() -> String {
-        if let down = health.summary { return down }
-        let n = threads.count
-        var parts = ["\(n) thread\(n == 1 ? "" : "s")"]
-        let states = threads.map { NaviStateMapper.state(for: $0) }
-        for s in NaviState.liveOrder {
-            let c = states.filter { $0 == s }.count
-            if c > 0 { parts.append("\(c) \(s.label)") }
-        }
-        if parts.count == 1 { parts.append(n == 0 ? "none open" : "all idle") }
-        if sleepTimer.sleeping { parts.append("sleeping") }
-        return parts.joined(separator: " · ")
+        MenubarDropdown.summary(states: threads.map { NaviStateMapper.state(for: $0) }, health: health, feed: feed, sleeping: sleepTimer.sleeping)
     }
 
     private func refreshStatusIcon() {
@@ -453,6 +478,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: actions
+
+    /// A dropdown thread row: exactly what Enter does on that row in Navi's menu.
+    @objc private func dropdownOpenThread(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, let row = menu.model.rows.first(where: { $0.id == id }) else { return }
+        runPrimary(row: row, thread: threads.first { $0.id == id })
+    }
 
     @objc private func menuToggleSleep() { toggleSleep() }
     @objc private func menuToggleHidden() { toggleHidden() }
@@ -500,14 +531,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func resetConfig() {
+        typealias A = MenubarDropdown.Advanced
+        let alert = NSAlert()
+        alert.messageText = A.resetConfirmTitle
+        alert.informativeText = A.resetConfirmBody
+        alert.addButton(withTitle: A.resetConfirmButton)
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         config = NaviConfig()
         Prefs.config = config
         applyConfig()
     }
 
-    @objc private func openThreadsJSON() {
-        if store.fileExists { NSWorkspace.shared.open(Paths.threadsJSON) }
-        else { NSWorkspace.shared.activateFileViewerSelecting([Paths.threadsJSON.deletingLastPathComponent()]) }
+    /// The folder the collector writes (threads.json), in Finder.
+    @objc private func openStatusDataFolder() {
+        NSWorkspace.shared.activateFileViewerSelecting([store.fileExists ? Paths.threadsJSON : Paths.threadsJSON.deletingLastPathComponent()])
     }
 
     @objc private func openSfxFolder() {

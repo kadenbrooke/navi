@@ -1,8 +1,9 @@
 import AppKit
 import PetCore
 
-/// Runs a thread action's shell command via /bin/sh, in the thread's worktree.
-/// Only ever called from a click. Destructive commands ask first.
+/// Runs a thread action in the thread's worktree: its `argv` directly (every open command
+/// Navi builds — no shell, so a path or URL is only ever an argument), else the collector's
+/// shell command via /bin/sh. Only ever called from a click. Destructive commands ask first.
 enum ActionRunner {
     static func run(_ action: ThreadAction, for thread: BuildThread) {
         if action.isDestructive {
@@ -17,8 +18,13 @@ enum ActionRunner {
         }
         NSLog("Navi: run [%@] %@", action.label, action.command)
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", action.command]
+        if let argv = action.argv, let exe = argv.first {
+            p.executableURL = URL(fileURLWithPath: exe)
+            p.arguments = Array(argv.dropFirst())
+        } else {
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", action.command]
+        }
         if let wt = thread.worktreePath, FileManager.default.fileExists(atPath: wt) {
             p.currentDirectoryURL = URL(fileURLWithPath: wt)
         }

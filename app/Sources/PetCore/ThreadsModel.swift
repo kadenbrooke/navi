@@ -55,10 +55,22 @@ public struct GitInfo: Codable, Equatable, Sendable {
 
 public struct ThreadAction: Codable, Equatable, Sendable {
     public var label: String
+    /// What runs, as text: the collector's shell command, or (when `argv` is set) a
+    /// shell-quoted rendering of `argv` for logs and the confirm dialog only.
     public var command: String
+    /// Executable + arguments, run directly with no shell. Every open command Navi builds
+    /// (`OpenTargets`) sets it, so a path or URL with quotes or `$(…)` is only ever an
+    /// argument. nil = a collector shell command (`git pull …`), run via /bin/sh.
+    public var argv: [String]?
 
-    public init(label: String, command: String) {
-        self.label = label; self.command = command
+    public init(label: String, command: String, argv: [String]? = nil) {
+        self.label = label; self.command = command; self.argv = argv
+    }
+
+    /// The target of a plain `open <target>` (no -a / -b), or nil.
+    public var openTarget: String? {
+        guard let argv, argv.count == 2, argv[0] == OpenTargets.openTool else { return nil }
+        return argv[1]
     }
 }
 
@@ -131,31 +143,123 @@ public struct BuildThread: Codable, Equatable, Sendable {
         return String(c)
     }
 
-    /// What a plain click / Enter on the row does, with the default prefs (desktop app).
-    public var primaryAction: ThreadAction? { primaryAction(openChatsInBrowser: false) }
+    /// What a plain click / Enter on the row does, with the default prefs (desktop app, Terminal).
+    public var primaryAction: ThreadAction? { primaryAction(OpenPrefs()) }
 
-    /// What a plain click / Enter on the row does:
-    /// 1. an Omnigent-backed row opens its chat — in the desktop app (`omnigent://`) or, with
-    ///    the "Open chats in browser" pref, the web UI. PR / terminal stay in the context menu.
-    /// 2. otherwise (Claude CLI / Codex rows): the PR if there is one, else a terminal, else
-    ///    the first action. Never a `git worktree remove`.
     public func primaryAction(openChatsInBrowser browser: Bool) -> ThreadAction? {
-        if let link = chatLink(browser: browser) {
-            return ThreadAction(label: browser ? "Open chat in browser" : "Open chat in Omnigent", command: "open \"\(link)\"")
+        primaryAction(OpenPrefs(chatsInBrowser: browser))
+    }
+
+    /// What a plain click / Enter on the row does (labels say where it opens):
+    /// 1. an Omnigent-backed row opens its chat — in the Omnigent desktop app (`open -b`, so
+    ///    the link never lands in another app) or, with the "Open chats in browser" pref, the
+    ///    web UI. PR / terminal stay in the context menu.
+    /// 2. otherwise (Claude CLI / Codex rows): the PR if there is one, else the worktree in
+    ///    your terminal app, else the first action. Never a `git worktree remove`.
+    public func primaryAction(_ prefs: OpenPrefs) -> ThreadAction? {
+        if let link = chatLink(browser: prefs.chatsInBrowser) {
+            return prefs.chatsInBrowser ? OpenTargets.open(link, label: "Open chat in browser") : OpenTargets.omnigent(link)
         }
-        let list = (actions ?? []).filter { !$0.isDestructive }
-        if pr?.url != nil, let open = list.first(where: { $0.command.hasPrefix("open \"http") || $0.command.hasPrefix("open http") }) {
+        let list = actions(prefs).filter { !$0.isDestructive }
+        if pr?.url != nil, let open = list.first(where: { $0.openTarget?.hasPrefix("http") == true }) {
             return open
         }
-        if let term = list.first(where: { $0.command.contains("-a Terminal") || $0.label.lowercased().contains("terminal") }) {
+        if let term = list.first(where: { $0.argv?.prefix(3) == [OpenTargets.openTool, "-a", prefs.terminal.appName] }) {
             return term
         }
         return list.first
     }
 
+    /// The collector's actions as the menus offer them: the terminal action opens the
+    /// worktree in your terminal app, the Omnigent deep link opens in the Omnigent
+    /// desktop app, each label says where it opens, and every `open "…"` becomes a no-shell
+    /// argv. Other commands (`git pull …`, the confirmed worktree remove) are unchanged.
+    public func actions(_ prefs: OpenPrefs) -> [ThreadAction] {
+        (actions ?? []).map { a in
+            if OpenTargets.isTerminal(a), let path = worktreePath ?? OpenTargets.quotedArgument(a.command) {
+                return OpenTargets.terminal(path, app: prefs.terminal)
+            }
+            if a.command.hasPrefix("open \""), let target = OpenTargets.quotedArgument(a.command) {
+                return target.hasPrefix("omnigent://") ? OpenTargets.omnigent(target) : OpenTargets.open(target, label: a.label)
+            }
+            return a
+        }
+    }
+
     /// Epoch seconds of `lastSeen`, for the menu's recency sort.
     public var lastSeenEpoch: Double? {
         lastSeen.flatMap { ISO8601DateFormatter.lenient($0) }?.timeIntervalSince1970
+    }
+}
+
+/// Your terminal for opening a worktree. `auto` (the default) picks iTerm when it is
+/// installed, else Terminal.
+public enum TerminalApp: String, Equatable, Sendable, CaseIterable {
+    case iTerm, terminal = "Terminal"
+
+    public static let iTermBundleID = "com.googlecode.iterm2"
+
+    /// The name `open -a` takes and the menus show.
+    public var appName: String { rawValue }
+
+    /// `pref`: the stored value (`auto` / unset, `iTerm`, `Terminal`, any case).
+    public static func resolve(pref: String?, iTermInstalled: Bool) -> TerminalApp {
+        switch pref?.lowercased() {
+        case "iterm", "iterm2": return .iTerm
+        case "terminal": return .terminal
+        default: return iTermInstalled ? .iTerm : .terminal
+        }
+    }
+}
+
+/// Where a click opens things; built from Prefs on the app side.
+public struct OpenPrefs: Equatable, Sendable {
+    public var chatsInBrowser: Bool
+    public var terminal: TerminalApp
+    public init(chatsInBrowser: Bool = false, terminal: TerminalApp = .terminal) {
+        self.chatsInBrowser = chatsInBrowser; self.terminal = terminal
+    }
+}
+
+/// The one place the open commands and their labels are built. Each is an argv for
+/// `/usr/bin/open`, never a shell string, so nothing in a path or URL can run.
+public enum OpenTargets {
+    public static let omnigentBundleID = "ai.omnigent.desktop"
+    public static let openTool = "/usr/bin/open"
+
+    public static func omnigent(_ deepLink: String) -> ThreadAction {
+        argv("Open in Omnigent", ["-b", omnigentBundleID, deepLink])
+    }
+
+    public static func terminal(_ path: String, app: TerminalApp) -> ThreadAction {
+        argv("Open in \(app.appName)", ["-a", app.appName, path])
+    }
+
+    /// `open <url>` in the default handler (browser for http).
+    public static func open(_ target: String, label: String) -> ThreadAction {
+        argv(label, [target])
+    }
+
+    static func argv(_ label: String, _ args: [String]) -> ThreadAction {
+        ThreadAction(label: label, command: (["open"] + args.map(shellQuote)).joined(separator: " "), argv: [openTool] + args)
+    }
+
+    /// POSIX single-quoting for display (`/wt a` → `'/wt a'`, `it's` → `'it'\''s'`); plain
+    /// path / URL characters stay bare.
+    public static func shellQuote(_ s: String) -> String {
+        let plain = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "@%+=:,./-_"))
+        if !s.isEmpty, s.unicodeScalars.allSatisfy({ plain.contains($0) && $0.isASCII }) { return s }
+        return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    static func isTerminal(_ a: ThreadAction) -> Bool {
+        a.command.hasPrefix("open -a Terminal ") || a.label.lowercased().contains("terminal")
+    }
+
+    /// `open -a Terminal "/x y"` → `/x y`.
+    static func quotedArgument(_ command: String) -> String? {
+        guard let start = command.firstIndex(of: "\""), let end = command.lastIndex(of: "\""), start < end else { return nil }
+        return String(command[command.index(after: start)..<end])
     }
 }
 
@@ -175,11 +279,13 @@ public struct ThreadsSnapshot: Codable, Equatable, Sendable {
     /// Per-harness quota rows for the menu's usage page. `nil` = collector predates usage.mjs.
     public var usage: [UsageRow]?
     public var usagePolledAt: String?
+    /// Is the Omnigent feed behind the chat rows live? `nil` = collector predates it.
+    public var omnigentFeed: OmnigentFeedInfo?
 
     public init(generatedAt: String? = nil, repo: String? = nil, sources: [String: String]? = nil, threads: [BuildThread],
-                usage: [UsageRow]? = nil, usagePolledAt: String? = nil) {
+                usage: [UsageRow]? = nil, usagePolledAt: String? = nil, omnigentFeed: OmnigentFeedInfo? = nil) {
         self.generatedAt = generatedAt; self.repo = repo; self.sources = sources; self.threads = threads
-        self.usage = usage; self.usagePolledAt = usagePolledAt
+        self.usage = usage; self.usagePolledAt = usagePolledAt; self.omnigentFeed = omnigentFeed
     }
 }
 

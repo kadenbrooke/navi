@@ -54,6 +54,7 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { collectUsageWithCache, renderUsage } from "./usage.mjs";
 import { DEFAULT_REPO, OUT_DIR, OUT_FILE, PREV_FILE } from "./paths.mjs";
+import { fetchOmnigentJson } from "./omnigent-fetch.mjs";
 
 export { DEFAULT_REPO, OUT_DIR, OUT_FILE, PREV_FILE };
 
@@ -515,18 +516,6 @@ export function mapOmnigentSessions(payload, { onlineRunners = null } = {}) {
     });
 }
 
-async function fetchJson(url, timeoutMs) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: ctl.signal });
-    if (!res.ok) throw new Error(`omnigent HTTP ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(t);
-  }
-}
-
 // Pages through every session. The envelope is { data, has_more, last_id };
 // `?after=<last_id>` is the only cursor the server honours (page/offset/
 // starting_after are ignored and return page one again).
@@ -535,7 +524,7 @@ export function parseRunners(payload) {
   return new Set(rows.filter((r) => r && r.online === true && r.runner_id).map((r) => r.runner_id));
 }
 
-export async function collectOmnigentFull(url = OMNIGENT_URL, { fetchJson: fj = fetchJson, runnersUrl = null } = {}) {
+export async function collectOmnigentFull(url = OMNIGENT_URL, { fetchJson: fj = fetchOmnigentJson, runnersUrl = null } = {}) {
   const base = new URL(url);
   const rUrl = runnersUrl ?? `${base.origin}/v1/runners`;
   let onlineRunners = null;
@@ -628,7 +617,7 @@ export function omnigentSessionDetailUrl(id, base = OMNIGENT_BASE) {
 // status, a few at a time. Each miss is silent (the row keeps its roll-up).
 export async function resolveOmnigentParentStatus(
   sessions,
-  { fetchJson: fj = fetchJson, base = OMNIGENT_BASE, concurrency = 6, timeoutMs = THRESHOLDS.OMNIGENT_TIMEOUT_MS } = {},
+  { fetchJson: fj = fetchOmnigentJson, base = OMNIGENT_BASE, concurrency = 6, timeoutMs = THRESHOLDS.OMNIGENT_TIMEOUT_MS } = {},
 ) {
   const out = new Map();
   const targets = (sessions || []).filter(
@@ -1244,6 +1233,10 @@ export async function collect({
   }
 
   let sessions = [];
+  // Navi reads this to tell a real "no chats" from a feed it cannot see:
+  // ok | last-known (rows are the last ones Omnigent reported, as of `since`) |
+  // unavailable (no Omnigent rows at all in this snapshot).
+  let omnigentFeed = { status: "ok" };
   try {
     sessions.push(...collectClaudeSessions(home, { procs }));
     sources.claude = "ok";
@@ -1265,9 +1258,17 @@ export async function collect({
     }
     applyParentStatus(rows, overlay);
     sessions.push(...rows);
-    sources.omnigent = "ok";
+    const lk = given.omnigent?.lastKnown;
+    if (lk) {
+      const reason = String(lk.reason || "feed down").split("\n")[0];
+      sources.omnigent = `last-known: ${reason}`;
+      omnigentFeed = { status: "last-known", since: lk.since ?? null, error: reason };
+    } else {
+      sources.omnigent = "ok";
+    }
   } catch (e) {
     sources.omnigent = unavailable(e);
+    omnigentFeed = { status: "unavailable", error: sources.omnigent.replace(/^unavailable:\s*/, "") };
   }
   try {
     sessions.push(...(given.codex ?? (await collectCodex(home, { procs }))));
@@ -1279,7 +1280,7 @@ export async function collect({
   const threads = buildThreads({ worktrees, gitByPath, prs, registry, sessions }, now);
   const dormant = threads.dormant || [];
   delete threads.dormant;
-  const snapshot = { generatedAt: new Date(now).toISOString(), repo: mainWorktree, sources, threads, dormant };
+  const snapshot = { generatedAt: new Date(now).toISOString(), repo: mainWorktree, sources, omnigentFeed, threads, dormant };
 
   // Quota usage for Navi's last menu page. Each source is non-fatal inside
   // usage.mjs; this guard only covers the cache file itself.

@@ -36,11 +36,15 @@
 // backoff, and the last-good rows are kept for OMNIGENT_GRACE_MS so a server
 // restart does not flash every chat row away. While WS is down, REST refreshes
 // the list every 10 s; rows remain available in degraded mode while those
-// refreshes succeed. They are dropped only when both feeds exceed the grace.
+// refreshes succeed. When both feeds exceed the grace, the last rows Omnigent
+// actually reported stay in the snapshot for OMNIGENT_LAST_KNOWN_MS more,
+// flagged `omnigentFeed.status = "last-known"`, so a feed blip never reads as
+// "0 threads" in Navi; past that they drop and the feed reads "unavailable".
 //
 // No npm deps. Node >= 22.13 (global WebSocket, fetch, node:sqlite).
 
 import { watch as fsWatch } from "node:fs";
+import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -65,16 +69,26 @@ import {
 } from "./collect.mjs";
 import { collectUsageWithCache } from "./usage.mjs";
 import { run as notifyRun } from "./notify.mjs";
+import { fetchOmnigentJson, formatOmnigentFetchError } from "./omnigent-fetch.mjs";
 
 
 export const DAEMON = {
   DEBOUNCE_MS: 300, // event -> collect; coalesces bursts (300-500 ms window; 300 keeps edge-to-file under 500)
   TICK_MS: 60_000, // slow fallback for git / PR / usage
   OMNIGENT_GRACE_MS: 20_000, // keep last-good rows this long after the socket drops
+  // After the grace, keep the last rows Omnigent reported, flagged last-known, this much
+  // longer. An Omnigent restart or a loaded Mac timing out the REST poll recovers well
+  // inside it; past it a frozen "working" row is more likely wrong than right, so the
+  // rows drop and Navi says the feed is unavailable instead.
+  OMNIGENT_LAST_KNOWN_MS: 5 * 60_000,
   BACKOFF_MIN_MS: 1000,
   BACKOFF_MAX_MS: 30_000,
   DETAIL_TIMEOUT_MS: 8000, // parent-status baseline fetch
   LIST_TIMEOUT_MS: 15_000,
+  WS_CONNECT_TIMEOUT_MS: 15_000,
+  SELF_HEAL_MS: 5 * 60_000, // restart after a continuous WS + REST outage
+  SELF_HEAL_PROBE_TIMEOUT_MS: 1000,
+  SELF_HEAL_RETRY_MS: 30_000,
   BASELINE_ATTEMPTS: 3,
   INITIAL_BASELINE_HOLD_MS: 2000,
 };
@@ -91,6 +105,43 @@ export function nextBackoff(prev, { min = DAEMON.BACKOFF_MIN_MS, max = DAEMON.BA
 export function jitterBackoff(ms, { factor = 0.2 } = {}) {
   const delta = ms * factor;
   return Math.floor(ms - delta + Math.random() * 2 * delta);
+}
+
+// A process-wide transport failure is not repaired by another collect. Let
+// launchd's KeepAlive restart us after both independent Omnigent paths have
+// been down continuously for the threshold. The later of the two failures is
+// the beginning of the interval during which both were down.
+export function selfHealDecision({
+  wsConnected = false,
+  wsFailedAt = null,
+  restFailedAt = null,
+  now = Date.now(),
+  thresholdMs = DAEMON.SELF_HEAL_MS,
+} = {}) {
+  if (wsConnected || wsFailedAt === null || restFailedAt === null) return null;
+  const nowMs = typeof now === "function" ? now() : now;
+  const since = Math.max(wsFailedAt, restFailedAt);
+  const elapsedMs = nowMs - since;
+  if (elapsedMs < thresholdMs) return null;
+  return { since, elapsedMs };
+}
+
+// A TCP connect answers the narrow question self-heal needs: is the local
+// Omnigent listener reachable right now? It does not inspect HTTP or WS state.
+export function probeOmnigentTcp(host, port, timeoutMs = DAEMON.SELF_HEAL_PROBE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = createConnection({ host, port });
+    const finish = (reachable) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(reachable);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.on("error", () => finish(false));
+  });
 }
 
 // Which Omnigent rows want a per-session SSE: a live, un-archived PARENT whose
@@ -211,18 +262,6 @@ export function makeCoalescer(job, { delayMs = DAEMON.DEBOUNCE_MS, setTimeoutFn 
 // ---------------------------------------------------------------------------
 // Defaults for the injectable I/O (tests replace every one of these)
 // ---------------------------------------------------------------------------
-async function defaultFetchJson(url, timeoutMs) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: ctl.signal });
-    if (!res.ok) throw new Error(`omnigent HTTP ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(t);
-  }
-}
-
 function defaultWsFactory(url) {
   return new WebSocket(url);
 }
@@ -281,13 +320,14 @@ export function createDaemon({
   debounceMs = DAEMON.DEBOUNCE_MS,
   tickMs = DAEMON.TICK_MS,
   graceMs = DAEMON.OMNIGENT_GRACE_MS,
+  lastKnownMs = DAEMON.OMNIGENT_LAST_KNOWN_MS,
   outagePollMs = Math.min(10_000, Math.max(1_000, Math.floor(graceMs / 2))),
   initialBaselineHoldMs = DAEMON.INITIAL_BASELINE_HOLD_MS,
   backoff = { min: DAEMON.BACKOFF_MIN_MS, max: DAEMON.BACKOFF_MAX_MS },
   usage = process.env.NAVI_NO_USAGE !== "1",
   watchFs = true,
   // injectables
-  fetchJson = defaultFetchJson,
+  fetchJson = fetchOmnigentJson,
   wsFactory = defaultWsFactory,
   openSse = defaultOpenSse,
   collectFn = collect,
@@ -300,6 +340,11 @@ export function createDaemon({
   log = defaultLog,
   debug = process.env.NAVI_DEBUG === "1",
   now = Date.now,
+  exitFn = (code) => process.exit(code),
+  probeTcpFn = probeOmnigentTcp,
+  wsConnectTimeoutMs = DAEMON.WS_CONNECT_TIMEOUT_MS,
+  selfHealMs = DAEMON.SELF_HEAL_MS,
+  selfHealRetryMs = DAEMON.SELF_HEAL_RETRY_MS,
 } = {}) {
   const wsUrl = omnigentBase.replace(/^http/, "ws") + "/v1/sessions/updates";
   const listUrl = `${omnigentBase}/v1/sessions`;
@@ -322,13 +367,38 @@ export function createDaemon({
   let ws = null;
   let wsConnected = false;
   let wsEverConnected = false;
-  let wsDisconnectedAt = null;
+  // Two clocks, kept apart on purpose:
+  //   LIVENESS  wsProven / lastLiveAt. The WS feed is event-driven: a connected
+  //             socket that has delivered a recognized data frame (or that was up
+  //             when a REST list succeeded) is current even when silent, because
+  //             no change means no frame. Its close buys only the short graceMs
+  //             (a server restart does not flash rows away), measured from the close.
+  //   DATA      lastFeedDataAt. Advances ONLY on a recognized data frame
+  //             (snapshot / changed / removed) or a successful REST list. The
+  //             last-known `since` and deadline run from this alone. Heartbeats,
+  //             unknown frame types, opens and closes never move it.
+  // An open that closes without proving itself (a flap) moves neither clock.
+  let wsProven = false;
+  let lastLiveAt = null; // close time of a proven socket: liveness grace only
   let wsBackoff = 0;
   let wsTimer = null;
+  let wsConnectTimer = null;
   let watchTimer = null;
-  let omnigentError = "not connected yet";
-  let lastRestSuccessAt = null;
+  let wsError = null;
+  let restError = null;
+  let wsFailedAt = null;
+  let restFailedAt = null;
+  let selfHealTimer = null;
+  let selfHealTriggered = false;
+  let selfHealProbeInFlight = false;
+  let selfHealProbeLogged = false;
+  let wsCloseCount = 0;
+  // Last time Omnigent actually gave us row data (see the two clocks above).
+  let lastFeedDataAt = null;
   let restPollTimer = null;
+  // The last session list omnigentSource() served from a fresh feed, kept for the
+  // last-known window after both feeds go stale.
+  let lastGoodSessions = null;
 
   // --- parent-only status ----------------------------------------------------
   const parentStatus = new Map(); // id -> { status, seq } (normalized status + monotonic sequence)
@@ -344,6 +414,81 @@ export function createDaemon({
   const stats = { collects: 0, writes: 0, lastReasons: [], lastCollectMs: 0, lastWriteAt: null, errors: 0 };
 
   const dlog = (line) => debug && log(line);
+
+  function clearSelfHealTimer() {
+    if (selfHealTimer) clearTimeout(selfHealTimer);
+    selfHealTimer = null;
+  }
+
+  function omnigentErrorText() {
+    const causes = [];
+    if (wsError) causes.push(`ws: ${wsError}`);
+    if (restError) causes.push(`rest: ${restError}`);
+    return causes.join("; ");
+  }
+
+  function maybeSelfHeal(reason) {
+    const decision = selfHealDecision({ wsConnected, wsFailedAt, restFailedAt, now, thresholdMs: selfHealMs });
+    if (!decision || selfHealTriggered || selfHealProbeInFlight || stopped) return false;
+    selfHealProbeInFlight = true;
+    const target = new URL(omnigentBase);
+    const host = target.hostname;
+    const port = Number(target.port) || (target.protocol === "https:" ? 443 : 80);
+    Promise.resolve()
+      .then(() => probeTcpFn(host, port, DAEMON.SELF_HEAL_PROBE_TIMEOUT_MS))
+      .then((reachable) => {
+        if (!reachable) {
+          if (!selfHealProbeLogged) {
+            selfHealProbeLogged = true;
+            log(`omnigent self-heal: TCP probe ${host}:${port} failed; continuing to wait (${omnigentErrorText() || reason || "no cause"})`);
+          }
+          return false;
+        }
+        return resyncList("self-heal-probe").then((restOk) => {
+          const currentDecision = selfHealDecision({ wsConnected, wsFailedAt, restFailedAt, now, thresholdMs: selfHealMs });
+          if (restOk || !currentDecision) return false;
+          selfHealTriggered = true;
+          clearSelfHealTimer();
+          log(`omnigent self-heal: WS and REST unavailable for ${currentDecision.elapsedMs}ms (${omnigentErrorText() || reason || "no cause"}); TCP ${host}:${port} is reachable and REST still fails, exiting 1`);
+          exitFn(1);
+          return true;
+        });
+      })
+      .catch((error) => {
+        if (!selfHealProbeLogged) {
+          selfHealProbeLogged = true;
+          log(`omnigent self-heal: TCP probe ${host}:${port} failed (${omnigentErrorText() || reason || error?.message || error}); continuing to wait`);
+        }
+      })
+      .finally(() => {
+        selfHealProbeInFlight = false;
+        if (!selfHealTriggered && !stopped && wsFailedAt !== null && restFailedAt !== null) {
+          // The threshold remains satisfied after a failed probe. Give the
+          // local service time to come back before probing again; otherwise
+          // the failed promise would spin synchronously at the threshold.
+          selfHealTimer = setTimeout(() => {
+            selfHealTimer = null;
+            scheduleSelfHealCheck();
+          }, selfHealRetryMs);
+        }
+      });
+    return true;
+  }
+
+  function scheduleSelfHealCheck() {
+    if (stopped || selfHealTriggered || selfHealTimer || wsFailedAt === null || restFailedAt === null) return;
+    const decision = selfHealDecision({ wsConnected, wsFailedAt, restFailedAt, now, thresholdMs: selfHealMs });
+    if (decision) {
+      maybeSelfHeal("threshold reached");
+      return;
+    }
+    const since = Math.max(wsFailedAt, restFailedAt);
+    const elapsed = now() - since;
+    selfHealTimer = setTimeout(() => {
+      selfHealTimer = null;
+      maybeSelfHeal("threshold timer");
+    }, Math.max(1, selfHealMs - elapsed + 1));
+  }
 
   // ---- collect + write --------------------------------------------------------
   async function runCollect(reasons) {
@@ -386,7 +531,7 @@ export function createDaemon({
         resolveParentStatus: false,
       });
       if (cache.codex === null) snapshot.sources.codex = "pending";
-      snapshot.daemon = { reasons, ws: wsConnected ? "connected" : `down: ${omnigentError}`, streams: streams.size };
+      snapshot.daemon = { reasons, ws: wsConnected ? "connected" : `down: ${wsError || "not connected yet"}`, streams: streams.size };
       writeFn(snapshot);
       stats.writes++;
       stats.lastWriteAt = snapshot.generatedAt;
@@ -433,14 +578,26 @@ export function createDaemon({
     if (!stopped) coalescer.schedule(reason);
   };
 
-  // What collect() sees for Omnigent. Either the WS or a recent successful
-  // REST list keeps the rows available; only when both are stale is the source
-  // considered down.
+  // What collect() sees for Omnigent. Live (a proven connected socket, or within
+  // graceMs of a proven socket's close) or data within graceMs keeps the rows
+  // current; otherwise the source is down. Down, the last rows it served stay
+  // until lastFeedDataAt + graceMs + lastKnownMs, tagged `lastKnown` (`since` =
+  // lastFeedDataAt); past that the cached rows expire and the source is empty
+  // until Omnigent sends data again. Liveness never extends that deadline.
   function omnigentSource() {
-    const wsFresh = wsConnected || (wsDisconnectedAt !== null && now() - wsDisconnectedAt <= graceMs);
-    const restFresh = lastRestSuccessAt !== null && now() - lastRestSuccessAt <= graceMs;
-    const down = !wsFresh && !restFresh;
-    if (down) return { sessions: [], runners: cache.runnersStatus, error: `unavailable: ${omnigentError}` };
+    const within = (t) => t !== null && now() - t <= graceMs;
+    const fresh = (wsConnected && wsProven) || within(lastLiveAt) || within(lastFeedDataAt);
+    if (!fresh) {
+      if (lastGoodSessions && lastFeedDataAt !== null && now() - lastFeedDataAt <= graceMs + lastKnownMs) {
+        return {
+          sessions: lastGoodSessions,
+          runners: cache.runnersStatus,
+          lastKnown: { since: new Date(lastFeedDataAt).toISOString(), reason: omnigentErrorText() || "no data" },
+        };
+      }
+      if (lastGoodSessions || rows.size) expireOmnigentRows();
+      return { sessions: [], runners: cache.runnersStatus, error: `unavailable: ${omnigentErrorText() || "no data"}` };
+    }
     const { hidden, unresolved } = settleInitialBaselines();
     let sessions = mapOmnigentSessions([...rows.values()], { onlineRunners: cache.runners });
     if (hidden.size) {
@@ -462,6 +619,7 @@ export function createDaemon({
     // "running" (a later idle baseline would read as a finished turn). Unknown
     // renders idle; a real baseline or edge then moves it either way.
     for (const s of sessions) if (unresolved.has(s.id)) s.status = "unknown";
+    lastGoodSessions = sessions;
     return { sessions, runners: cache.runnersStatus };
   }
 
@@ -506,6 +664,20 @@ export function createDaemon({
     return { hidden, unresolved };
   }
 
+  // Past the last-known window every cached Omnigent fact is history: the rows,
+  // the parents' own statuses, the "already shown" marks. Nothing of it may come
+  // back through a reconnect or a partial frame; only new feed data refills it,
+  // and a returning running parent goes through the cold-start hold again.
+  function expireOmnigentRows() {
+    lastGoodSessions = null;
+    rows.clear();
+    parentStatus.clear();
+    for (const id of [...initialBaselines.keys()]) clearInitialBaseline(id);
+    introducedParents.clear();
+    reconcileStreams();
+    log("omnigent last-known window over: cached rows dropped until the feed sends data");
+  }
+
   function clearInitialBaseline(id) {
     const hold = initialBaselines.get(id);
     if (!hold) return;
@@ -524,12 +696,31 @@ export function createDaemon({
       return;
     }
     ws = sock;
+    wsFailedAt ??= now();
+    const detachAndClose = (reason) => {
+      if (sock !== ws) return false;
+      onWsClosed(reason);
+      sock.onopen = null;
+      sock.onmessage = null;
+      sock.onerror = null;
+      sock.onclose = null;
+      try {
+        sock.close();
+      } catch {}
+      return true;
+    };
+    wsConnectTimer = setTimeout(() => {
+      if (sock !== ws || wsConnected) return;
+      const reason = `connect timeout after ${wsConnectTimeoutMs}ms`;
+      wsError = formatOmnigentFetchError(new Error(reason), wsUrl, { method: "WS" });
+      detachAndClose(wsError);
+    }, wsConnectTimeoutMs);
     sock.onopen = () => {
       if (sock !== ws) return;
       wsConnected = true;
       wsEverConnected = true;
+      wsProven = false;
       wsBackoff = 0;
-      wsDisconnectedAt = null;
       if (graceTimer) {
         clearTimeout(graceTimer);
         graceTimer = null;
@@ -538,7 +729,12 @@ export function createDaemon({
         clearTimeout(restPollTimer);
         restPollTimer = null;
       }
-      omnigentError = null;
+      if (wsConnectTimer) clearTimeout(wsConnectTimer);
+      wsConnectTimer = null;
+      wsError = null;
+      wsFailedAt = null;
+      selfHealProbeLogged = false;
+      clearSelfHealTimer();
       log("omnigent ws connected");
       // Fresh list from REST so the watch-set is complete (sessions created
       // while we were down have no id we could otherwise know).
@@ -552,11 +748,21 @@ export function createDaemon({
       } catch {
         return;
       }
-      handleFrame(frame);
+      if (handleFrame(frame)) {
+        wsProven = true;
+        lastFeedDataAt = now();
+      }
     };
     sock.onerror = (ev) => {
       if (sock !== ws) return;
-      omnigentError = ev?.message || "socket error";
+      wsFailedAt ??= now();
+      wsError = formatOmnigentFetchError(ev?.error || ev, wsUrl, { method: "WS" });
+      log(`omnigent ws error: ${wsError}`);
+      if (!wsConnected) {
+        detachAndClose(wsError);
+        return;
+      }
+      scheduleSelfHealCheck();
     };
     sock.onclose = (ev) => {
       if (sock !== ws) return;
@@ -565,12 +771,20 @@ export function createDaemon({
   }
 
   function onWsClosed(reason) {
+    wsCloseCount++;
     ws = null;
+    if (wsConnectTimer) clearTimeout(wsConnectTimer);
+    wsConnectTimer = null;
     const wasConnected = wsConnected;
     wsConnected = false;
-    if (wasConnected || wsDisconnectedAt === null) wsDisconnectedAt = now();
-    omnigentError = reason || "closed";
-    if (wasConnected) log(`omnigent ws down: ${omnigentError}`);
+    // A proven socket was live right up to now: that buys the liveness grace,
+    // never data freshness. A flap was never live.
+    wsFailedAt ??= now();
+    if (wasConnected && wsProven) lastLiveAt = now();
+    wsProven = false;
+    wsError ||= reason || "closed";
+    if (wasConnected) log(`omnigent ws down: ${wsError}`);
+    scheduleSelfHealCheck();
     // Streams reopen on resync. Preserve each parent's last-known own status
     // across the transport outage so reconnect bookkeeping cannot manufacture
     // a working -> idle transition.
@@ -587,7 +801,8 @@ export function createDaemon({
         graceTimer = setTimeout(() => {
           graceTimer = null;
           if (!wsConnected) {
-            if (omnigentSource().error) log(`omnigent WS and REST still down after ${graceMs}ms grace — dropping its rows`);
+            if (omnigentSource().lastKnown) log(`omnigent WS and REST still down after ${graceMs}ms grace — showing last-known rows for up to ${lastKnownMs}ms`);
+            else if (omnigentSource().error) log(`omnigent WS and REST still down after ${graceMs}ms grace — no last-known rows, dropping`);
             else dlog("omnigent WS down; serving fresh REST rows in degraded mode");
             schedule("omnigent:grace-expired");
           }
@@ -607,8 +822,11 @@ export function createDaemon({
     }, outagePollMs);
   }
 
+  // Returns true for a recognized data frame (snapshot / changed / removed),
+  // false for anything else (heartbeats, unknown types), which is ignored.
   function handleFrame(frame) {
-    if (!frame || typeof frame !== "object") return;
+    if (!frame || typeof frame !== "object") return false;
+    if (frame.type !== "snapshot" && frame.type !== "changed" && frame.type !== "removed") return false;
     let changed = false;
     if (frame.type === "snapshot" || frame.type === "changed") {
       for (const item of frame.items || []) {
@@ -633,6 +851,7 @@ export function createDaemon({
       reconcileStreams();
       schedule("omnigent:list");
     }
+    return true;
   }
 
   // Fields the row -> thread mapping actually reads. Anything else changing
@@ -684,7 +903,12 @@ export function createDaemon({
   async function resyncList(reason) {
     try {
       const raw = await pageRawList();
-      lastRestSuccessAt = now();
+      restFailedAt = null;
+      restError = null;
+      selfHealProbeLogged = false;
+      clearSelfHealTimer();
+      lastFeedDataAt = now();
+      if (wsConnected) wsProven = true;
       const seen = new Set();
       let changed = false;
       for (const item of raw) {
@@ -710,8 +934,12 @@ export function createDaemon({
       if (changed) schedule(`omnigent:resync`);
       return true;
     } catch (e) {
-      omnigentError = String(e?.message || e).split("\n")[0];
-      dlog(`resync (${reason}) failed: ${omnigentError}`);
+      const wasHealthy = restFailedAt === null;
+      restFailedAt ??= now();
+      restError = formatOmnigentFetchError(e, listUrl);
+      if (wasHealthy) log(`omnigent resync (${reason}) failed: ${restError}`);
+      else dlog(`resync (${reason}) failed: ${restError}`);
+      scheduleSelfHealCheck();
       return false;
     }
   }
@@ -949,7 +1177,7 @@ export function createDaemon({
       }
       // Always resync via REST regardless of WS state. During an extended WS outage,
       // the REST list is the only way to get fresh session data. On failure,
-      // resyncList leaves rows alone and records omnigentError; the staleness/grace
+      // resyncList leaves rows alone and records the REST error; the staleness/grace
       // logic will surface "collector/omnigent down" without a misleading snapshot.
       await resyncList(reason);
       await coalescer.flush(reason);
@@ -999,9 +1227,11 @@ export function createDaemon({
     stopped = true;
     if (tickTimer) clearInterval(tickTimer);
     if (wsTimer) clearTimeout(wsTimer);
+    if (wsConnectTimer) clearTimeout(wsConnectTimer);
     if (graceTimer) clearTimeout(graceTimer);
     if (watchTimer) clearTimeout(watchTimer);
     if (restPollTimer) clearTimeout(restPollTimer);
+    clearSelfHealTimer();
     for (const id of [...initialBaselines.keys()]) clearInitialBaseline(id);
     coalescer.cancel();
     for (const id of [...streams.keys()]) closeStream(id);
@@ -1043,6 +1273,9 @@ export function createDaemon({
     get wsEverConnected() {
       return wsEverConnected;
     },
+    get wsCloseCount() {
+      return wsCloseCount;
+    },
     get stats() {
       return stats;
     },
@@ -1051,6 +1284,9 @@ export function createDaemon({
     },
     _handleFrame: handleFrame,
     _omnigentSource: omnigentSource,
+    get restPollPending() {
+      return !!restPollTimer;
+    },
   };
 }
 

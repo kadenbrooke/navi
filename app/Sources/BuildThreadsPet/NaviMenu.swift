@@ -22,9 +22,14 @@ final class MenuController {
     private let sortNote = NSTextField(labelWithString: "")
     private var outsideMonitor: Any?
     private var threadsById: [String: BuildThread] = [:]
+    /// Where a click opens things (Prefs.openPrefs): row hover hints and the right-click list.
+    var openPrefs = OpenPrefs()
+    /// Omnigent feed state: a note above the thread rows when it is last-known or missing.
+    var feed: OmnigentFeed = .ok
     /// nil until the collector has ever written `usage[]` (older collector / first run).
-    private var hasUsageData = false
-    private var usagePolledAt: String?
+    /// Read by the menubar dropdown too, so both surfaces show the same data.
+    private(set) var hasUsageData = false
+    private(set) var usagePolledAt: String?
 
     var onSound: ((SoundID) -> Void)?
     var onSelect: ((MenuRow, BuildThread?) -> Void)?
@@ -231,7 +236,13 @@ final class MenuController {
 
     private func renderThreadRows() {
         let rows = model.pageRows
-        if rows.isEmpty {
+        if let text = feed.note(now: Date()) {
+            let note = UsageNoteView(text: text, height: 22)
+            note.toolTip = text
+            rowsStack.addArrangedSubview(note)
+            note.widthAnchor.constraint(equalToConstant: MenuController.width - 16).isActive = true
+        }
+        if rows.isEmpty, feed != .unavailable {
             let empty = MenuRowView(row: MenuRow(id: "", name: "no build threads", state: .idle, changedAt: 0, status: ""), workingColor: workingColor, index: 0)
             empty.showDot = false
             rowsStack.addArrangedSubview(empty)
@@ -245,6 +256,7 @@ final class MenuController {
                 _ = self.model.moveTo(i, quiet: true); self.highlight(); self.select()
             }
             v.onRightClick = { [weak self] i, event in self?.showActions(for: i, event: event) }
+            v.toolTip = threadsById[r.id]?.primaryAction(openPrefs).map { "Click: \($0.label)" }
             rowsStack.addArrangedSubview(v)
             rowViews.append(v)
         }
@@ -275,9 +287,7 @@ final class MenuController {
             let f = UsageNoteView(text: "no quota: " + footer.map(\.footerText).joined(separator: ", "), height: 22)
             rowsStack.addArrangedSubview(f)
         }
-        if let polled = usagePolledAt, hasUsageData {
-            let ago = UsageFormat.parse(polled).map { Int(Date().timeIntervalSince($0)) } ?? 0
-            let text = ago < 90 ? "polled just now" : (ago < 5400 ? "polled \(ago / 60)m ago" : "polled \(ago / 3600)h ago")
+        if hasUsageData, let text = UsageFormat.polledAgo(usagePolledAt, now: Date()) {
             rowsStack.addArrangedSubview(UsageNoteView(text: text, height: 18))
         }
         for v in rowsStack.arrangedSubviews where !(v is MenuSelectableView) {
@@ -295,7 +305,7 @@ final class MenuController {
         let menu = NSMenu()
         let t = NSMenuItem(title: thread.branch ?? thread.name, action: nil, keyEquivalent: ""); t.isEnabled = false
         menu.addItem(t); menu.addItem(.separator())
-        let actions = thread.actions ?? []
+        let actions = thread.actions(openPrefs)
         if actions.isEmpty { let n = NSMenuItem(title: "No actions", action: nil, keyEquivalent: ""); n.isEnabled = false; menu.addItem(n) }
         for a in actions {
             let item = NSMenuItem(title: a.label, action: #selector(MenuActionTarget.run(_:)), keyEquivalent: "")
@@ -443,7 +453,7 @@ final class MenuRowView: MenuSelectableView {
         status.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         status.textColor = MenuTheme.fg3.withAlphaComponent(dim)
         status.lineBreakMode = .byTruncatingTail
-        let state = NSTextField(labelWithString: row.status.isEmpty && row.id.isEmpty ? "" : "\(row.state.symbol) \(row.idle ? "idle" : row.state.label)")
+        let state = NSTextField(labelWithString: row.stateText)
         state.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         state.textColor = MenuTheme.fg2.withAlphaComponent(dim)
         state.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -545,26 +555,13 @@ final class UsageRowView: MenuSelectableView {
         translatesAutoresizingMaskIntoConstraints = false
         heightAnchor.constraint(equalToConstant: UsageRowView.height(for: row)).isActive = true
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
-        toolTipText()
+        toolTip = row.tooltip
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private func toolTipText() {
-        var parts: [String] = []
-        if let reason = row.blockedReason { parts.append(reason) }
-        if let shared = row.sharedBy, !shared.isEmpty { parts.append("shared by \(shared.joined(separator: ", "))") }
-        if let note = row.note { parts.append(note) }
-        toolTip = parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
     override var isFlipped: Bool { true }
 
-    private var accent: NSColor {
-        if row.error != nil { return MenuTheme.fg3 }
-        if row.blocked { return MenuTheme.color(UsageBar.red) }
-        let worst = row.windows.map(\.usedPct).max() ?? 0
-        return MenuTheme.color(UsageBar.hex(forPct: worst))
-    }
+    private var accent: NSColor { row.accentHex.map(MenuTheme.color) ?? MenuTheme.fg3 }
 
     override func draw(_ dirtyRect: NSRect) {
         let r = bounds.insetBy(dx: 0, dy: 1)

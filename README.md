@@ -153,15 +153,41 @@ exits 0, so it cannot block a prompt. Merge these into any hooks you already hav
 - **Click her** → the thread list, 6 per page, worst first or most recent first.
   Keys: `↑` `↓` move · `←` `→` page · `Tab` flip sort · `Enter` open · `Esc` close.
   Idle rows (no activity for 10 min) are dimmed and listed last.
-- **Enter / click on a row** → a Claude Code or Codex row opens its PR if it has one, else a
-  Terminal in its worktree. An Omnigent row opens the chat in the Omnigent app (or the browser —
-  menubar menu → *Open chats in browser*). Right-click the fairy for the other actions.
-- **Right-click her** → Hide · Sleep/Wake · Sound on/off · Open threads.json · Quit.
+- **Enter / click on a row** → a Claude Code or Codex row opens its PR if it has one, else its
+  worktree in your terminal: **iTerm when it is installed, else Terminal**
+  (`defaults write dev.navi.pet terminalApp Terminal` or `iTerm` overrides the auto-pick).
+  An Omnigent row opens the chat in the Omnigent desktop app (`open -b ai.omnigent.desktop`,
+  so the link never lands in another app), or the browser with *Open chats in browser* on.
+  Hover a row to see where a click opens it (`Click: Open in iTerm`); right-click the row for
+  the other actions, under the same labels. Every open runs as a plain argument list, never
+  through a shell, and is logged to `~/Library/Logs/navi.log`.
+- **Omnigent feed blips.** When the collector cannot reach Omnigent it keeps the last chat rows
+  for up to 5 minutes and says so: both menus show `Omnigent feed unavailable — showing last
+  known from 2m ago` above the threads and the status line ends in `· last known`. Her color
+  and sounds do not change for a blip. Past 5 minutes the chats drop and the line reads
+  `Omnigent feed unavailable — Omnigent chats not shown` (never a bare `0 threads`); when the
+  feed comes back the chats return without a pop or chime.
+- **Right-click her** → Hide · Sleep/Wake · Sound on/off · idle notifications · Advanced ▸ · Quit.
 - **⌥⌘P** anywhere → sleep / wake. **⌥⌘N** anywhere → hide / show.
-- **Menubar Triforce** (three triangles). A dot means something is blocked or needs input.
-  Left-click hides/shows her; right-click for the menu (sound, notifications, config
-  copy/paste/reset, open the sfx folder, Launch at Login — leave that off, the LaunchAgent
-  already starts her at login).
+- **Menubar Triforce** (three triangles). A dot means something is blocked or needs input;
+  hover it for a one-line count. **Click it** (left, right or ctrl-click) for the dropdown:
+  everything her own menu shows, so she can stay hidden and you still see status. It is
+  rebuilt each time it opens, whether she is shown, hidden or asleep:
+  - the status line (`4 threads · 2 working · 1 needs input`, or the collector / Omnigent
+    feed called out when either is down), then **every build thread** with its state dot,
+    `⟳ working` / `✓ idle` and status line, in the same order as her menu. Clicking a thread
+    does what `Enter` does on it. Long status lines are cut; hover for the full text.
+  - **Quota ▸**, titled with the fullest harness and window (`Quota · Cursor (cycle) 100%`,
+    or `Quota · Codex blocked`): one row per quota harness with its windows and resets, the
+    no-quota footer and the polled time.
+  - *Hide Navi* / *Show Navi* (⌥⌘N), *Sleep Navi* / *Wake Navi* (⌥⌘P), then settings: sound,
+    idle notifications, *Open chats in browser*, Launch at Login (leave it off, the
+    LaunchAgent already starts her at login).
+  - **Advanced ▸** (also in her right-click menu): *Open status data folder*, *Open sound
+    clips folder*, *Copy / Paste look & behaviour settings* (her config JSON) and *Reset look
+    & behaviour…*, which asks first.
+
+  Clicking the Triforce never hides or shows her; use the menu item or ⌥⌘N.
 
 ![Menubar icon, shown and hidden](docs/menubar-triforce.png)
 
@@ -223,6 +249,7 @@ cd app && NAVI_THREADS_PATH=Tests/PetCoreTests/Fixtures/threads-sample.json swif
 ```
 
 More knobs: `NAVI_OPEN_MENU=1` (or `=usage`) opens the menu a second after launch,
+`NAVI_OPEN_MENU=menubar` opens the menubar Triforce's dropdown,
 `NAVI_MENUBAR_SHOT=<dir>` captures the menubar icon and quits, `NAVI_DEBUG=1` logs every
 collect in the daemon. The collector's internals (event sources, state rules, snapshot
 shape) are documented in [`collector/README.md`](collector/README.md).

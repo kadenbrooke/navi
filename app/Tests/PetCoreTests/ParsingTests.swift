@@ -82,8 +82,8 @@ final class ParsingTests: XCTestCase {
         XCTAssertNil(chat.pr)
         XCTAssertEqual(chat.state, .active)
         // older collector (no omnigentDeepLink field): the desktop link is derived from the http action
-        XCTAssertEqual(chat.primaryAction?.command, "open \"omnigent://localhost:6767/c/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01\"")
-        XCTAssertEqual(chat.primaryAction(openChatsInBrowser: true)?.command, "open \"http://127.0.0.1:6767/c/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01\"")
+        XCTAssertEqual(chat.primaryAction?.argv, ["/usr/bin/open", "-b", "ai.omnigent.desktop", "omnigent://localhost:6767/c/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01"])
+        XCTAssertEqual(chat.primaryAction(openChatsInBrowser: true)?.argv, ["/usr/bin/open", "http://127.0.0.1:6767/c/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01"])
         XCTAssertEqual(snap.threads[1].state, .blocked)
         XCTAssertEqual(NaviStateMapper.state(for: snap.threads[1]), .blocked)
         XCTAssertEqual(snap.threads[2].state, .needsInput)
@@ -111,10 +111,12 @@ final class ParsingTests: XCTestCase {
         let rm = ThreadAction(label: "Remove worktree", command: "git worktree remove /x")
 
         let withPR = thread("a", .prOpen, pr: PullRequest(number: 1, url: "https://github.com/o/r/pull/1"), actions: [term, pr, pull])
-        XCTAssertEqual(withPR.primaryAction, pr)
+        XCTAssertEqual(withPR.primaryAction?.argv, ["/usr/bin/open", "https://github.com/o/r/pull/1"])
+        XCTAssertEqual(withPR.primaryAction?.label, pr.label)
 
         let noPR = thread("b", .uncommitted, actions: [pull, term, rm])
-        XCTAssertEqual(noPR.primaryAction, term)
+        XCTAssertEqual(noPR.primaryAction?.argv, ["/usr/bin/open", "-a", "Terminal", "/x"],
+                       "no worktreePath: the path comes from the collector's command")
 
         let onlyDestructive = thread("c", .stale, actions: [rm])
         XCTAssertNil(onlyDestructive.primaryAction, "never auto-pick a worktree remove")

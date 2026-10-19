@@ -6,14 +6,17 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   createDaemon,
+  DAEMON,
   makeCoalescer,
   nextBackoff,
   parseSseChunk,
+  selfHealDecision,
   wantsParentStream,
 } from "./collect-daemon.mjs";
 import {
@@ -32,6 +35,16 @@ const until = async (pred, { timeout = 3000, step = 10 } = {}) => {
     if (Date.now() - t0 > timeout) throw new Error("timed out waiting");
     await sleep(step);
   }
+};
+const listenEphemeral = async (server) => {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  return server.address().port;
+};
+const closeServer = async (server) => {
+  if (server.listening) await new Promise((resolve) => server.close(resolve));
 };
 
 const NOW = Date.now();
@@ -115,6 +128,21 @@ test("backoff doubles from min and caps at max", () => {
   let b = 0;
   for (let i = 0; i < 6; i++) seq.push((b = nextBackoff(b, o)));
   assert.deepEqual(seq, [100, 200, 400, 800, 1000, 1000]);
+});
+
+test("self-heal decision waits until both transports have been down continuously", () => {
+  assert.equal(
+    selfHealDecision({ wsFailedAt: 100, restFailedAt: 200, now: 200 + DAEMON.SELF_HEAL_MS - 1 }),
+    null,
+  );
+  assert.deepEqual(
+    selfHealDecision({ wsFailedAt: 100, restFailedAt: 200, now: 200 + DAEMON.SELF_HEAL_MS }),
+    { since: 200, elapsedMs: DAEMON.SELF_HEAL_MS },
+  );
+  assert.equal(
+    selfHealDecision({ wsConnected: true, wsFailedAt: 100, restFailedAt: 200, now: 200 + DAEMON.SELF_HEAL_MS }),
+    null,
+  );
 });
 
 test("parseSseChunk handles split frames, event lines and [DONE]", () => {
@@ -288,12 +316,21 @@ class FakeSocket {
     this.url = url;
     this.sent = [];
     this.closed = false;
+    this.readyState = 0; // CONNECTING
   }
   send(s) {
     this.sent.push(JSON.parse(s));
   }
   close() {
     this.closed = true;
+    if (this.readyState === 0) {
+      this.onerror?.({ error: new Error("WebSocket closed during connect") });
+    }
+    this.readyState = 3; // CLOSED
+  }
+  serverClose() {
+    this.closed = true;
+    this.readyState = 3; // CLOSED
     this.onclose?.({ code: 1000, reason: "test close" });
   }
 }
@@ -369,6 +406,7 @@ function harness({ list = [listItem()], detail = {}, debounceMs = 20, graceMs = 
   });
   const openSocket = () => {
     const s = sockets.at(-1);
+    s.readyState = 1; // OPEN
     s.onopen?.();
     return s;
   };
@@ -447,12 +485,13 @@ describe("daemon", () => {
   });
 
   test("Omnigent down: rows survive the grace window, then drop; nothing fake stays live", async () => {
-    const h = harness({ detail: { p1: "running" } });
+    // lastKnownMs 0: the last-known hold is off here; its own tests are below.
+    const h = harness({ detail: { p1: "running" }, lastKnownMs: 0 });
     await h.d.start();
     const sock = h.openSocket();
     await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
 
-    sock.close(); // server went away
+    sock.serverClose(); // server went away
     assert.equal(h.d.wsConnected, false);
     assert.equal(h.streams.size, 0, "parent streams are torn down with the socket");
     // inside the grace: the last-good row is still there
@@ -481,6 +520,160 @@ describe("daemon", () => {
     assert.equal(omnigentRows(h.snapshots.at(-1)).length, 0);
     assert.match(h.snapshots.at(-1).sources.omnigent, /^unavailable/);
     h.d.stop();
+  });
+
+  test("a pre-open WS error is a close even when the socket never emits close", async (t) => {
+    const h = harness({ outagePollMs: 10 });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const first = h.sockets[0];
+    const error = new TypeError("fetch failed");
+    error.cause = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    first.onerror?.({ error });
+    assert.equal(first.closed, true);
+    assert.equal(h.d.wsConnected, false);
+    assert.equal(h.d.restPollPending, true, "the REST fallback poll is armed");
+    await until(() => h.sockets.length >= 2, { timeout: 1000 });
+    assert.ok(h.state.listCalls >= 2, "the REST fallback poll ran");
+  });
+
+  test("a WS stuck in CONNECTING is closed and retried after the connect timeout", async (t) => {
+    const h = harness({ wsConnectTimeoutMs: 10, outagePollMs: 1000 });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const first = h.sockets[0];
+    await until(() => h.sockets.length >= 2, { timeout: 1000 });
+    assert.equal(first.closed, true);
+    assert.equal(h.d.wsConnected, false);
+    assert.equal(h.d.restPollPending, true, "the REST fallback poll is armed after timeout");
+  });
+
+  test("real Node WebSocket refusal closes once without re-entrant errors", async (t) => {
+    const reserve = createServer();
+    const port = await listenEphemeral(reserve);
+    await closeServer(reserve);
+    const logs = [];
+    let factoryCalls = 0;
+    const h = harness({
+      omnigentBase: `http://127.0.0.1:${port}`,
+      wsFactory: (url) => {
+        factoryCalls++;
+        return new WebSocket(url);
+      },
+      backoff: { min: 50, max: 50 },
+      log: (line) => logs.push(line),
+      fetchJson: async (url) => (url.includes("/v1/sessions") ? { object: "list", data: [], has_more: false } : { data: [] }),
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    await until(() => factoryCalls >= 2, { timeout: 1000 });
+    await until(() => h.d.wsCloseCount >= 2, { timeout: 1000 });
+    assert.equal(factoryCalls, 2, "one reconnect is scheduled for the first failed attempt");
+    assert.equal(h.d.wsCloseCount, 2, "each failed attempt closes once");
+    assert.ok(logs.filter((line) => line.includes("omnigent ws error:")).length <= factoryCalls);
+    assert.equal(logs.filter((line) => line.includes("RangeError")).length, 0);
+  });
+
+  test("real Node WebSocket connect timeout closes once without re-entrant errors", async (t) => {
+    const connections = new Set();
+    const server = createServer((socket) => {
+      connections.add(socket);
+      socket.on("close", () => connections.delete(socket));
+    });
+    const port = await listenEphemeral(server);
+    const logs = [];
+    let factoryCalls = 0;
+    const h = harness({
+      omnigentBase: `http://127.0.0.1:${port}`,
+      wsFactory: (url) => {
+        factoryCalls++;
+        return new WebSocket(url);
+      },
+      backoff: { min: 200, max: 200 },
+      wsConnectTimeoutMs: 30,
+      log: (line) => logs.push(line),
+      fetchJson: async (url) => (url.includes("/v1/sessions") ? { object: "list", data: [], has_more: false } : { data: [] }),
+    });
+    t.after(async () => {
+      h.d.stop();
+      for (const socket of connections) socket.destroy();
+      await closeServer(server);
+    });
+    await h.d.start();
+    await until(() => factoryCalls >= 2, { timeout: 1000 });
+    await until(() => h.d.wsCloseCount >= 2, { timeout: 1000 });
+    assert.equal(factoryCalls, 2, "one reconnect is scheduled for the first timed-out attempt");
+    assert.equal(h.d.wsCloseCount, 2, "each timed-out attempt closes once");
+    assert.ok(logs.filter((line) => line.includes("omnigent ws error:")).length <= factoryCalls);
+    assert.equal(logs.filter((line) => line.includes("RangeError")).length, 0);
+  });
+
+  test("self-heal logs the sustained transport cause and exits non-zero without killing the test", async () => {
+    const logs = [];
+    const exits = [];
+    let fakeNow = 1000;
+    let reachable = false;
+    const h = harness({
+      selfHealMs: 20,
+      selfHealRetryMs: 10,
+      now: () => fakeNow,
+      log: (line) => logs.push(line),
+      exitFn: (code) => exits.push(code),
+      probeTcpFn: async () => reachable,
+      fetchJson: async () => {
+        const error = new TypeError("fetch failed");
+        error.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:6767"), { code: "ECONNREFUSED" });
+        throw error;
+      },
+    });
+    await h.d.start();
+    assert.equal(exits.length, 0);
+    const wsError = new TypeError("fetch failed");
+    wsError.cause = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    h.sockets[0].onerror?.({ error: wsError });
+    assert.ok(logs.some((line) => /ws error: fetch failed; cause: ECONNRESET: socket hang up/.test(line)));
+    fakeNow += 20;
+    await until(() => logs.some((line) => /TCP probe .* failed; continuing to wait/.test(line)), { timeout: 1000 });
+    assert.deepEqual(exits, []);
+    assert.equal(logs.filter((line) => /TCP probe .* failed/.test(line)).length, 1);
+    reachable = true;
+    fakeNow += 10;
+    await until(() => exits.length === 1, { timeout: 1000 });
+    assert.deepEqual(exits, [1]);
+    assert.ok(logs.some((line) => /resync .*ECONNREFUSED/.test(line)), "first resync failure is info-level");
+    assert.ok(logs.some((line) => /self-heal: WS and REST unavailable/.test(line)));
+    h.d.stop();
+  });
+
+  test("self-heal probes REST once before exiting, and recovery cancels the exit", async (t) => {
+    const logs = [];
+    const exits = [];
+    let fakeNow = 1000;
+    let restored = false;
+    let restCalls = 0;
+    const h = harness({
+      selfHealMs: 20,
+      selfHealRetryMs: 10,
+      now: () => fakeNow,
+      log: (line) => logs.push(line),
+      exitFn: (code) => exits.push(code),
+      probeTcpFn: async () => true,
+      fetchJson: async (url) => {
+        if (url.includes("/v1/sessions")) restCalls++;
+        if (!restored) throw new Error("REST unavailable");
+        if (url.includes("/v1/runners")) return { data: [] };
+        return { object: "list", data: [], has_more: false };
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    h.sockets[0].onerror?.({ error: new Error("WebSocket handshake failed") });
+    restored = true;
+    fakeNow += 20;
+    await until(() => restCalls >= 2, { timeout: 1000 });
+    await sleep(20);
+    assert.deepEqual(exits, []);
+    assert.equal(logs.some((line) => line.includes("REST still fails, exiting 1")), false);
   });
 
   test("a discovered session (changed frame for an unwatched id) is added to the watch-set", async () => {
@@ -601,8 +794,47 @@ test("collect() honours handed-in sources and the parent overlay without touchin
   assert.equal(snap.threads[0].state, "idle");
   assert.equal(snap.threads[0].branch, "main", "branchForCwd filled the missing branch");
   assert.equal(snap.sources.omnigent, "ok");
+  assert.deepEqual(snap.omnigentFeed, { status: "ok" });
   assert.deepEqual(snap.usage, [{ harness: "x" }]);
   assert.equal(snap.usagePolledAt, "then");
+});
+
+test("collect() turns a last-known / failed Omnigent source into omnigentFeed for Navi", async () => {
+  const home = mkdtempSync(join(tmpdir(), "bt-home-"));
+  const git = {
+    mainWorktree: "/r",
+    worktrees: [],
+    gitByPath: {},
+    prs: [],
+    registry: null,
+    sources: { git: "ok", gh: "ok", registry: "ok" },
+    branchForCwd: () => "main",
+  };
+  const session = {
+    harness: "omnigent",
+    id: "p1",
+    title: "t",
+    status: "running",
+    listStatus: "running",
+    lastSeen: new Date().toISOString(),
+    cwd: "/r",
+    branch: null,
+    live: true,
+    child: false,
+    parentId: null,
+  };
+  const base = { repo: "/nowhere", home, usage: false, herdr: false, resolveParentStatus: false };
+  const held = await collect({
+    ...base,
+    sources: { git, procs: new Map(), codex: [], omnigent: { sessions: [session], runners: "ok", lastKnown: { since: "2026-10-17T10:00:00.000Z", reason: "fetch failed" } } },
+  });
+  assert.equal(held.threads.length, 1, "last-known rows are still threads");
+  assert.deepEqual(held.omnigentFeed, { status: "last-known", since: "2026-10-17T10:00:00.000Z", error: "fetch failed" });
+  assert.equal(held.sources.omnigent, "last-known: fetch failed");
+
+  const down = await collect({ ...base, sources: { git, procs: new Map(), codex: [], omnigent: { sessions: [], runners: "ok", error: "unavailable: fetch failed" } } });
+  assert.equal(down.threads.length, 0);
+  assert.deepEqual(down.omnigentFeed, { status: "unavailable", error: "fetch failed" });
 });
 
 // --- New tests for the fix round ---
@@ -825,7 +1057,7 @@ describe("parent-status baseline races", () => {
     await h.d.start();
     const first = h.openSocket();
     await until(() => h.d.parentStatus.get("p1")?.status === "running");
-    first.close();
+    first.serverClose();
     await until(() => h.sockets.length === 2);
     h.openSocket();
     await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "idle");
@@ -853,7 +1085,7 @@ describe("parent-status baseline races", () => {
     await h.d.start();
     const first = h.openSocket();
     await until(() => h.d.parentStatus.get("p1")?.status === "running");
-    first.close();
+    first.serverClose();
     await until(() => h.sockets.length === 2);
     h.openSocket();
     await until(() => detailCalls === 2 && h.streams.has("p1"));
@@ -881,7 +1113,7 @@ describe("parent-status baseline races", () => {
     await h.d.start();
     const first = h.openSocket();
     await until(() => h.d.parentStatus.get("p1")?.status === "unknown", { timeout: 2000 });
-    first.close();
+    first.serverClose();
     await until(() => h.sockets.length === 2);
     h.openSocket();
     await until(() => h.d.parentStatus.get("p1")?.status === "idle", { timeout: 2000 });
@@ -893,7 +1125,7 @@ describe("parent-status baseline races", () => {
     await h.d.start();
     const first = h.openSocket();
     await until(() => h.d.parentStatus.get("p1")?.status === "running");
-    first.close();
+    first.serverClose();
     h.state.list = [];
     await until(() => h.sockets.length === 2);
     h.openSocket();
@@ -947,7 +1179,7 @@ describe("parent-status baseline races", () => {
     await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "active");
 
     const reconnectSnapshots = h.snapshots.length;
-    firstSocket.close();
+    firstSocket.serverClose();
     assert.equal(h.d.streams.size, 0);
     await until(() => h.sockets.length === 2);
     h.openSocket();
@@ -1068,7 +1300,7 @@ describe("tick resync", () => {
     assert.equal(listCallCount, 2);
 
     // Disconnect WS
-    sock.close();
+    sock.serverClose();
     await until(() => h.d.wsConnected === false);
     // Trigger a collect while WS is down (within grace period)
     await h.d.coalescer.flush("test");
@@ -1105,7 +1337,7 @@ describe("tick resync", () => {
     await h.d.start();
     const sock = h.openSocket();
     await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
-    sock.close();
+    sock.serverClose();
 
     clock += 100;
     await h.d.tick("tick");
@@ -1114,7 +1346,246 @@ describe("tick resync", () => {
     failList = true;
     clock += 100;
     await h.d.tick("tick");
+    assert.ok(h.d._omnigentSource().lastKnown, "both feeds stale: the last-known rows hold");
+    clock += DAEMON.OMNIGENT_LAST_KNOWN_MS;
+    await h.d.tick("tick");
     assert.match(h.d._omnigentSource().error, /^unavailable:/);
+    h.d.stop();
+  });
+
+  // The "0 threads" bug: both feeds past the grace used to empty every chat row at
+  // once, so Navi read "0 threads · none open" and flashed white on a blip.
+  test("a feed blip keeps the last-known rows, flagged, with the same state and no idle alert", async (t) => {
+    let clock = 1_000;
+    let failList = false;
+    const h = harness({
+      graceMs: 50,
+      lastKnownMs: 1_000,
+      now: () => clock,
+      fetchJson: async (url) => {
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions/p1")) return { id: "p1", status: "running" };
+        if (url.includes("/v1/sessions")) {
+          if (failList) throw new Error("fetch failed");
+          return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const sock = h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1))[0]?.state === "active");
+    assert.deepEqual(h.snapshots.at(-1).omnigentFeed, { status: "ok" });
+    const lastGoodAt = clock;
+
+    failList = true;
+    sock.serverClose();
+    clock += 500; // past the 50 ms grace, inside the 1 s last-known window
+    await h.d.tick("tick");
+    let snap = h.snapshots.at(-1);
+    assert.equal(omnigentRows(snap).length, 1, "the chat row is still there");
+    assert.equal(omnigentRows(snap)[0].state, "active", "frozen at its last real state");
+    assert.equal(snap.omnigentFeed.status, "last-known");
+    assert.equal(snap.omnigentFeed.error, "ws: test close; rest: fetch failed [GET http://127.0.0.1:6767/v1/sessions]");
+    assert.equal(Date.parse(snap.omnigentFeed.since), lastGoodAt, "since = when the feed was last good");
+    assert.equal(snap.sources.omnigent, "last-known: ws: test close; rest: fetch failed [GET http://127.0.0.1:6767/v1/sessions]");
+
+    // the feed comes back: plain ok again, nothing announced in between
+    failList = false;
+    clock += 100;
+    await h.d.tick("tick");
+    snap = h.snapshots.at(-1);
+    assert.deepEqual(snap.omnigentFeed, { status: "ok" });
+    assert.equal(omnigentRows(snap).length, 1);
+    assert.deepEqual(idleAlerts(h.snapshots), [], "a blip never reads as a finished turn");
+  });
+
+  test("past the last-known window the rows drop and the feed says unavailable", async (t) => {
+    let clock = 1_000;
+    let failList = false;
+    const h = harness({
+      graceMs: 50,
+      lastKnownMs: 1_000,
+      now: () => clock,
+      fetchJson: async (url) => {
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (url.includes("/v1/sessions/p1")) return { id: "p1", status: "running" };
+        if (url.includes("/v1/sessions")) {
+          if (failList) throw new Error("fetch failed");
+          return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    await h.d.start();
+    const sock = h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
+    failList = true;
+    sock.serverClose();
+    clock += 50 + 1_000 + 1; // grace + last-known window, just past
+    await h.d.tick("tick");
+    const snap = h.snapshots.at(-1);
+    assert.equal(omnigentRows(snap).length, 0);
+    assert.equal(snap.omnigentFeed.status, "unavailable");
+    assert.match(snap.sources.omnigent, /^unavailable: /);
+  });
+
+  // A blipping feed reconnects again and again: an open that delivers no data
+  // must not restart the last-known clock (Codex review, fix round 1, issue 2).
+  function flappingHarness(t) {
+    const ctl = { clock: 1_000, failList: false };
+    const h = harness({
+      graceMs: 50,
+      lastKnownMs: 1_000,
+      now: () => ctl.clock,
+      fetchJson: async (url) => {
+        if (url.includes("/v1/runners")) return { data: [{ runner_id: "r1", online: true }] };
+        if (ctl.failList) throw new Error("fetch failed");
+        if (url.includes("/v1/sessions/p1")) return { id: "p1", status: "running" };
+        if (url.includes("/v1/sessions")) return { object: "list", data: [listItem()], has_more: false, last_id: "p1" };
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    t.after(() => h.d.stop());
+    return { h, ctl };
+  }
+  const nextSocket = async (h) => {
+    const n = h.sockets.length;
+    await until(() => h.sockets.length > n, { timeout: 1000 });
+    return h.openSocket();
+  };
+
+  test("reconnect flapping without data never extends the last-known deadline", async (t) => {
+    const { h, ctl } = flappingHarness(t);
+    await h.d.start();
+    const sock = h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
+    const lastGoodAt = ctl.clock;
+    ctl.failList = true;
+    sock.serverClose();
+
+    // flap three times inside the window: each socket opens, gets nothing, drops
+    for (let i = 0; i < 3; i++) {
+      ctl.clock += 300;
+      const s = await nextSocket(h);
+      await new Promise((r) => setTimeout(r, 5)); // its ws-open REST resync fails
+      s.serverClose();
+      await h.d.tick("tick");
+      assert.equal(h.snapshots.at(-1).omnigentFeed.status, "last-known", `flap ${i}: still inside the window`);
+      assert.equal(Date.parse(h.snapshots.at(-1).omnigentFeed.since), lastGoodAt, "since never moves on a flap");
+    }
+    ctl.clock = lastGoodAt + 50 + 1_000 + 1; // grace + window from the last REAL data
+    await h.d.tick("tick");
+    assert.equal(h.snapshots.at(-1).omnigentFeed.status, "unavailable");
+    assert.equal(omnigentRows(h.snapshots.at(-1)).length, 0);
+  });
+
+  test("expired rows never come back through a reconnect without data, only fresh data refills", async (t) => {
+    const { h, ctl } = flappingHarness(t);
+    await h.d.start();
+    const sock = h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
+    ctl.failList = true;
+    sock.serverClose();
+    ctl.clock += 50 + 1_000 + 1;
+    await h.d.tick("tick");
+    assert.equal(h.snapshots.at(-1).omnigentFeed.status, "unavailable");
+    assert.equal(h.d.parentStatus.size, 0, "expired parent statuses go too");
+
+    // a socket connects and STAYS connected, but REST still fails and no frame arrives
+    const s = await nextSocket(h);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(h.d.wsConnected, true);
+    await h.d.tick("tick");
+    assert.equal(omnigentRows(h.snapshots.at(-1)).length, 0, "the expired p1 is not re-mapped");
+    assert.equal(h.snapshots.at(-1).omnigentFeed.status, "unavailable");
+
+    // a real frame for another chat: that chat shows, the expired one does not
+    s.onmessage({ data: JSON.stringify({ type: "changed", items: [listItem({ id: "p2", title: "new", status: "idle" })] }) });
+    await h.d.tick("tick");
+    assert.deepEqual(omnigentRows(h.snapshots.at(-1)).map((r) => r.id), ["omnigent:p2"]);
+    assert.deepEqual(h.snapshots.at(-1).omnigentFeed, { status: "ok" });
+  });
+
+  // Codex review, fix round 2: liveness and data freshness are separate clocks.
+  test("a silent proven socket is live; its close buys only the grace, never a later last-known deadline", async (t) => {
+    const { h, ctl } = flappingHarness(t);
+    await h.d.start();
+    const sock = h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
+    const lastDataAt = ctl.clock;
+    ctl.failList = true;
+
+    // ten minutes connected and silent (event-driven feed, nothing changed): still current
+    ctl.clock += 10 * 60_000;
+    await h.d.tick("tick");
+    assert.deepEqual(h.snapshots.at(-1).omnigentFeed, { status: "ok" }, "a proven connected socket is live while silent");
+    assert.equal(omnigentRows(h.snapshots.at(-1)).length, 1);
+
+    // it closes: inside the 50 ms liveness grace the rows are still current ...
+    sock.serverClose();
+    ctl.clock += 10;
+    await h.d.tick("tick");
+    assert.deepEqual(h.snapshots.at(-1).omnigentFeed, { status: "ok" });
+    // ... and past it the deadline is the one from the last DATA, long gone: no
+    // fresh 5-minute last-known window starts at the close
+    ctl.clock += 100;
+    await h.d.tick("tick");
+    assert.equal(h.snapshots.at(-1).omnigentFeed.status, "unavailable");
+    assert.equal(omnigentRows(h.snapshots.at(-1)).length, 0);
+    assert.ok(ctl.clock - lastDataAt > 50 + 1_000, "the deadline ran from the last data, not the close");
+  });
+
+  test("heartbeat and unknown frames are not data: they never prove a socket or move the deadline", async (t) => {
+    const { h, ctl } = flappingHarness(t);
+    await h.d.start();
+    const sock = h.openSocket();
+    await until(() => omnigentRows(h.snapshots.at(-1)).length === 1);
+    const lastDataAt = ctl.clock;
+    ctl.failList = true;
+    sock.serverClose();
+
+    // a new socket connects (REST still failing) and only ever sends non-data frames
+    const s = await nextSocket(h);
+    await new Promise((r) => setTimeout(r, 5));
+    const noise = () => {
+      s.onmessage({ data: JSON.stringify({ type: "heartbeat" }) });
+      s.onmessage({ data: JSON.stringify({ type: "ping", ts: ctl.clock }) });
+      s.onmessage({ data: JSON.stringify({ hello: "world" }) });
+    };
+    ctl.clock += 500;
+    noise();
+    await h.d.tick("tick");
+    let snap = h.snapshots.at(-1);
+    assert.equal(snap.omnigentFeed.status, "last-known", "heartbeats do not make the rows current");
+    assert.equal(Date.parse(snap.omnigentFeed.since), lastDataAt, "since stays at the last data frame / REST list");
+
+    ctl.clock = lastDataAt + 50 + 1_000 + 1;
+    noise();
+    await h.d.tick("tick");
+    snap = h.snapshots.at(-1);
+    assert.equal(h.d.wsConnected, true, "the noisy socket is still up");
+    assert.equal(snap.omnigentFeed.status, "unavailable", "the deadline ran out despite the heartbeats");
+    assert.equal(omnigentRows(snap).length, 0);
+
+    // a real data frame is data again
+    s.onmessage({ data: JSON.stringify({ type: "snapshot", items: [listItem({ id: "p3", status: "idle" })] }) });
+    await h.d.tick("tick");
+    assert.deepEqual(h.snapshots.at(-1).omnigentFeed, { status: "ok" });
+    assert.deepEqual(omnigentRows(h.snapshots.at(-1)).map((r) => r.id), ["omnigent:p3"]);
+  });
+
+  test("no Omnigent data yet (daemon start, feed down): unavailable, never last-known", async () => {
+    const h = harness({
+      fetchJson: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+    await h.d.start();
+    assert.equal(h.snapshots.at(-1).omnigentFeed.status, "unavailable");
+    assert.equal(h.d._omnigentSource().lastKnown, undefined);
     h.d.stop();
   });
 });
