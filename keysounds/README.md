@@ -42,6 +42,10 @@ gives it a name and license in the picker.
   zip, or the hash of all listed files concatenated in map order for a file list
   (`cat f1 f2 … | shasum -a 256`). It is checked before anything is installed; a missing pin or
   a mismatch skips that pack with a `FAILED  <id>: …` line.
+- **One size limit for every pack: 500 files, 50 MB in total.** A file list naming more than
+  500 files is rejected before anything is downloaded; each of its downloads may only use what
+  is left of the 50 MB, and the running total is checked after every file, so a list that adds
+  up to more is abandoned mid-way (nothing installed, its downloads deleted).
 - **Zips are validated before extraction**, in this order after the checksum: more than 500
   entries or more than 50 MB uncompressed (read from the archive's directory) rejects it; any
   member with an absolute path, a `..` component, a backslash, or a symlink rejects it. During

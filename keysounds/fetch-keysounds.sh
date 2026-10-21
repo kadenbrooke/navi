@@ -15,7 +15,10 @@
 #   - every download is checked against the sha256 pinned in the manifest BEFORE anything is
 #     installed (zip: the archive; file list: all files concatenated in map order). No pin, or a
 #     mismatch, = that pack is skipped loudly.
-#   - zip archives over 500 entries or 50 MB uncompressed are rejected before extraction.
+#   - one limit for every pack, zip or file list: at most 500 files and 50 MB in total. A zip
+#     over either is rejected before extraction (from its directory); a file list naming more
+#     than 500 files is rejected before anything is downloaded, and one whose downloads add up
+#     to more than 50 MB is abandoned mid-way (nothing installed).
 #   - zip members are validated before extraction (no absolute paths, no `..`, no symlinks), and
 #     only regular audio files that resolve inside the extraction dir are copied.
 #   - a pack is staged in a temp dir and swapped into place only when complete; any failed step
@@ -53,15 +56,18 @@ trap 'rm -rf "$TMP"' EXIT
 json() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
 sha256() { shasum -a 256 | cut -d' ' -f1; }
 is_audio() { [[ "$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')" =~ ^(wav|mp3|flac|aif|aiff|caf|m4a)$ ]]; }
+
+# Per-pack limits, shared by both pack kinds. Zip: checked from the archive's directory before
+# extraction, and enforced again per file during extraction (ulimit) in case the directory lies.
+# File list: the entry count is checked before any download, the byte total during the downloads.
+MAX_PACK_BYTES=$((50 * 1024 * 1024))
+MAX_PACK_ENTRIES=500
+
+# download <url> <out> [max bytes]: curl exits 63 when the file is larger than the max.
 # Redirects are https only, always (even when the test hook allows file:// for the first hop).
-download() { curl -fsSL --proto "$PROTO" --proto-redir "=https" --max-filesize 52428800 -m 120 -A "Mozilla/5.0" "$1" -o "$2"; }
+download() { curl -fsSL --proto "$PROTO" --proto-redir "=https" --max-filesize "${3:-$MAX_PACK_BYTES}" -m 120 -A "Mozilla/5.0" "$1" -o "$2"; }
 
-# Zip-bomb limits, checked from the archive's directory before extraction, and enforced again
-# per file during extraction (ulimit) in case the directory lies.
-MAX_UNZIPPED_BYTES=$((50 * 1024 * 1024))
-MAX_ZIP_ENTRIES=500
-
-# Rejects archives over MAX_ZIP_ENTRIES entries or MAX_UNZIPPED_BYTES uncompressed.
+# Rejects archives over MAX_PACK_ENTRIES entries or MAX_PACK_BYTES uncompressed.
 zip_within_limits() {
   local zip=$1 totals entries bytes
   # `zipinfo -t`: "<n> file(s), <bytes> bytes uncompressed, <bytes> bytes compressed: <ratio>"
@@ -69,8 +75,8 @@ zip_within_limits() {
   entries="$(printf '%s' "$totals" | awk '{print $1}')"
   bytes="$(printf '%s' "$totals" | awk '{print $3}')"
   [[ "$entries" =~ ^[0-9]+$ && "$bytes" =~ ^[0-9]+$ ]] || { echo "  unreadable zip totals: $totals"; return 1; }
-  (( entries <= MAX_ZIP_ENTRIES )) || { echo "  $entries entries (limit $MAX_ZIP_ENTRIES)"; return 1; }
-  (( bytes <= MAX_UNZIPPED_BYTES )) || { echo "  $bytes bytes uncompressed (limit $MAX_UNZIPPED_BYTES)"; return 1; }
+  (( entries <= MAX_PACK_ENTRIES )) || { echo "  $entries entries (limit $MAX_PACK_ENTRIES)"; return 1; }
+  (( bytes <= MAX_PACK_BYTES )) || { echo "  $bytes bytes uncompressed (limit $MAX_PACK_BYTES)"; return 1; }
   return 0
 }
 
@@ -96,7 +102,9 @@ real_path() { local d; d="$(cd "$(dirname "$1")" && pwd -P)" || return 1; printf
 fetch_pack() {
   local tier=$1 id=$2 name=$3 license=$4 attribution=$5 source=$6 url=$7 sha=$8 map=$9
   local final="$DEST/$id" stage="$TMP/stage-$id" root="" got entry cls spec n f ext out
-  fail() { echo "FAILED  $id: $*"; return 1; }
+  # A failed pack's temp files go at once (not only at exit), so an abandoned pack never keeps
+  # its downloads around while the next pack runs.
+  fail() { echo "FAILED  $id: $*"; rm -rf "$stage" "$TMP/unzip-$id" "$TMP/$id.zip"; return 1; }
 
   [[ "$id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { fail "bad pack id"; return 1; }
   [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { fail "no sha256 pinned in the manifest"; return 1; }
@@ -116,12 +124,20 @@ fetch_pack() {
     root="$TMP/unzip-$id"
     mkdir -p "$root" || { fail "cannot create $root"; return 1; }
     # ulimit -f (512-byte blocks) caps every extracted file even if the zip directory lied.
-    ( ulimit -f $((MAX_UNZIPPED_BYTES / 512)); unzip -qq "$zip" -d "$root" ) || { fail "unzip failed"; return 1; }
+    ( ulimit -f $((MAX_PACK_BYTES / 512)); unzip -qq "$zip" -d "$root" ) || { fail "unzip failed"; return 1; }
     root="$(cd "$root" && pwd -P)" || { fail "cannot resolve $root"; return 1; }
   fi
 
-  local downloaded=()
+  local downloaded=() total=0 budget rc size listed=0
   IFS=';' read -ra entries <<<"$map"
+  if [[ -z "$root" ]]; then
+    # A file list is held to the zip limits too: count every listed file before downloading any.
+    for entry in "${entries[@]}"; do
+      IFS=',' read -ra files <<<"${entry#*:}"
+      listed=$((listed + ${#files[@]}))
+    done
+    (( listed <= MAX_PACK_ENTRIES )) || { fail "file list has $listed entries (limit $MAX_PACK_ENTRIES), nothing downloaded"; return 1; }
+  fi
   for entry in "${entries[@]}"; do
     cls="${entry%%:*}"; spec="${entry#*:}"; n=0
     [[ "$cls" =~ ^(key|space|enter|backspace)$ ]] || { fail "unknown class '$cls' in map"; return 1; }
@@ -143,7 +159,16 @@ fetch_pack() {
         case "$f" in */*|..*) fail "file names must not contain paths: $f"; return 1 ;; esac
         n=$((n+1)); ext="${f##*.}"
         out="$stage/$(printf '%s-%02d' "$cls" "$n").$ext"
-        download "$url${f// /%20}" "$out" || { fail "download failed ($url$f)"; return 1; }
+        # Each download may use only what is left of the pack's byte budget (curl stops at it
+        # when the size is known), and the running total is checked after every file.
+        budget=$((MAX_PACK_BYTES - total))
+        (( budget > 0 )) || { fail "file list over $MAX_PACK_BYTES bytes in total, not installed"; return 1; }
+        download "$url${f// /%20}" "$out" "$budget"; rc=$?
+        (( rc != 63 )) || { fail "file list over $MAX_PACK_BYTES bytes in total, not installed"; return 1; }
+        (( rc == 0 )) || { fail "download failed ($url$f)"; return 1; }
+        size="$(wc -c <"$out" | tr -d ' ')" || { fail "cannot size $f"; return 1; }
+        total=$((total + size))
+        (( total <= MAX_PACK_BYTES )) || { fail "file list over $MAX_PACK_BYTES bytes in total, not installed"; return 1; }
         downloaded+=("$out")
       done
     fi

@@ -40,10 +40,18 @@ z("symlink.zip", [("file", "pack/key-a.wav", b"RIFF"), ("link", "pack/key-z.wav"
 z("entries.zip", [("file", "pack/key-%03d.wav" % i, b"R") for i in range(501)])
 with zipfile.ZipFile(os.path.join(fix, "inflate.zip"), "w", zipfile.ZIP_DEFLATED) as zf:
     zf.writestr("pack/key-a.wav", b"\0" * (51 * 1024 * 1024))
+# A file list whose files are each under the per-file cap but add up to 52 MB.
+os.makedirs(os.path.join(fix, "big"))
+for n in ("big1.wav", "big2.wav"):
+    with open(os.path.join(fix, "big", n), "wb") as f:
+        f.write(b"\0" * (26 * 1024 * 1024))
 PY
 printf 'one' > "$FIX/raw/a.wav"; printf 'two' > "$FIX/raw/b.mp3"; printf 'three' > "$FIX/raw/space.wav"
 U="file://$FIX"
 RAWSHA="$(cat "$FIX/raw/a.wav" "$FIX/raw/b.mp3" "$FIX/raw/space.wav" | shasum -a 256 | cut -d' ' -f1)"
+BIGSHA="$(cat "$FIX/big/big1.wav" "$FIX/big/big2.wav" | shasum -a 256 | cut -d' ' -f1)"
+# 501 listed files that do not exist: rejecting the list must happen before any download.
+MANY="$(for i in $(seq 0 500); do printf 'k%03d.wav,' "$i"; done)"; MANY="${MANY%,}"
 T=$'\t'
 row() { printf '%s\n' "$1${T}Name $1${T}CC0${T}-${T}https://example.invalid/$1${T}$2${T}$3${T}$4"; }
 
@@ -59,10 +67,13 @@ row() { printf '%s\n' "$1${T}Name $1${T}CC0${T}-${T}https://example.invalid/$1${
   row inflate   "$U/inflate.zip"   "$(sha "$FIX/inflate.zip")"   "key:pack/key-*.wav"
   row bombsum   "$U/inflate.zip"   "$(printf 'b%.0s' {1..64})"   "key:pack/key-*.wav"
 } > "$MAN/packs-public.tsv"
-# Local: a file-list pack with the right concatenated checksum, and one with a wrong one.
+# Local: a file-list pack with the right concatenated checksum, one with a wrong one, and two
+# over the shared pack limits (too many files; right checksum but over 50 MB in total).
 {
-  row rawgood "$U/raw/" "$RAWSHA" "key:a.wav,b.mp3;space:space.wav"
-  row rawbad  "$U/raw/" "$(printf 'f%.0s' {1..64})" "key:a.wav,b.mp3;space:space.wav"
+  row rawgood   "$U/raw/"  "$RAWSHA" "key:a.wav,b.mp3;space:space.wav"
+  row rawbad    "$U/raw/"  "$(printf 'f%.0s' {1..64})" "key:a.wav,b.mp3;space:space.wav"
+  row manyfiles "$U/many/" "$(printf 'c%.0s' {1..64})" "key:$MANY"
+  row bigfiles  "$U/big/"  "$BIGSHA" "key:big1.wav;space:big2.wav"
 } > "$MAN/packs-local.tsv"
 
 run() { NAVI_KEYSOUNDS_MANIFESTS="$MAN" NAVI_KEYSOUNDS_DIR="$DEST" NAVI_KEYSOUNDS_ALLOW_FILE_URLS=1 "$RUNNER" "$SCRIPT" "$@" 2>&1; }
@@ -70,7 +81,7 @@ run() { NAVI_KEYSOUNDS_MANIFESTS="$MAN" NAVI_KEYSOUNDS_DIR="$DEST" NAVI_KEYSOUND
 out="$(run all)"; code=$?
 echo "$out" | sed 's/^/      | /'
 check "exit status is non-zero when any pack failed" '[[ $code -ne 0 ]]'
-check "summary names every failed pack" 'echo "$out" | grep -q "2 ok, 9 failed (badsum traversal absolute symlink nopin entries inflate bombsum rawbad)"'
+check "summary names every failed pack" 'echo "$out" | grep -q "2 ok, 11 failed (badsum traversal absolute symlink nopin entries inflate bombsum rawbad manyfiles bigfiles)"'
 check "good zip pack installed" '[[ -f "$DEST/good/key-01.wav" && -f "$DEST/good/key-02.wav" && ! -e "$DEST/good/key-03.wav" ]]'
 check "only matched audio copied (no notes.txt)" '[[ $(ls "$DEST/good" | wc -l) -eq 3 ]]'
 check "pack.json records the sha256" 'grep -q "\"sha256\":\"$(sha "$FIX/good.zip")\"" "$DEST/good/pack.json"'
@@ -85,6 +96,8 @@ check "redirects can only go to https" 'grep -q -- "--proto-redir \"=https\"" "$
 check "missing pin: rejected" 'echo "$out" | grep -q "FAILED  nopin: no sha256 pinned" && [[ ! -e "$DEST/nopin" ]]'
 check "file-list pack verified and installed" '[[ -f "$DEST/rawgood/key-01.wav" && -f "$DEST/rawgood/key-02.mp3" && -f "$DEST/rawgood/space-01.wav" ]]'
 check "file-list checksum mismatch: skipped" 'echo "$out" | grep -q "FAILED  rawbad: checksum mismatch" && [[ ! -e "$DEST/rawbad" ]]'
+check "file list over 500 entries: rejected before any download" 'echo "$out" | grep -q "FAILED  manyfiles: file list has 501 entries (limit 500), nothing downloaded" && [[ ! -e "$DEST/manyfiles" ]]'
+check "file list over 50 MB in total: abandoned, not installed" 'echo "$out" | grep -q "FAILED  bigfiles: file list over 52428800 bytes in total, not installed" && [[ ! -e "$DEST/bigfiles" ]]'
 check "no staging leftovers in the packs folder" '[[ -z "$(ls -d "$DEST"/*.part 2>/dev/null)" ]]'
 
 out="$(run public)"
