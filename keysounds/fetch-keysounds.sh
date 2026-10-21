@@ -26,8 +26,14 @@
 #   - the summary names every failed pack, and the exit status is non-zero if any failed.
 #
 # Navi works without any of it: with no pack fetched she plays a built-in synth click.
-# Each pack lands as key-01.wav … (+ optional space-/enter-/backspace-NN) plus a pack.json
-# with its name, license, tier, source and sha256, which her profile picker shows.
+# Each pack lands as its press samples plus a pack.json with its name, license, tier, source
+# and sha256 (plus a hash of its map line), which her profile picker shows. Map classes and the files they become:
+#   key / space / enter / backspace   -> key-01.wav …, space-01.wav …   (generic + special keys)
+#   up-key / up-space / up-enter / up-backspace -> up-key-01.mp3 …   (key-up recordings)
+#   row0 … row4                       -> row0-01.mp3 …                  (per keyboard row)
+#   sc<N>                             -> sc<N>.wav       (one key's own press, Mechvibes scancode N)
+#   sc                                -> sc<N>.wav for every matched file named <N>.<ext>
+# A pack needs at least one press class (key, row* or sc*); Navi derives releases it lacks.
 #
 # Test hooks: NAVI_KEYSOUNDS_MANIFESTS=<dir> reads the .tsv files from another folder;
 # NAVI_KEYSOUNDS_ALLOW_FILE_URLS=1 allows file:// downloads (https only otherwise; redirects
@@ -60,6 +66,31 @@ sha256() { shasum -a 256 | cut -d' ' -f1; }
 # no `.`, no leading `-`.
 valid_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; }
 is_audio() { [[ "$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')" =~ ^(wav|mp3|flac|aif|aiff|caf|m4a)$ ]]; }
+# Map classes (see the header) and the folder each file lands under.
+CLASS_RE='^(key|space|enter|backspace|up-key|up-space|up-enter|up-backspace|row[0-4]|sc|sc[0-9]{1,5})$'
+# File-list names: at most one subfolder (some packs keep press/ and release/ side by side), no dot
+# segments (so no `..`), no backslashes; `[` `]` and spaces are allowed and URL-encoded.
+NAME_RE='^[][A-Za-z0-9_ .-]+(/[][A-Za-z0-9_ .-]+)?$'
+safe_name() {
+  [[ "$1" =~ $NAME_RE ]] || return 1
+  case "/$1" in */.*) return 1 ;; esac
+  return 0
+}
+url_name() { local u=${1// /%20}; u=${u//\[/%5B}; u=${u//\]/%5D}; printf '%s' "$u"; }
+# The installed name of the n-th file of a class. `sc` keeps the scancode from the source name.
+out_name() {
+  local cls=$1 n=$2 src=$3 ext=${3##*.} base stem
+  case "$cls" in
+    sc)
+      base="${src##*/}"; stem="${base%.*}"
+      [[ "$stem" =~ ^[0-9]{1,5}$ ]] || return 1
+      printf 'sc%d.%s' "$((10#$stem))" "$ext" ;;
+    sc[0-9]*)
+      (( n == 1 )) || return 1
+      printf '%s.%s' "$cls" "$ext" ;;
+    *) printf '%s-%02d.%s' "$cls" "$n" "$ext" ;;
+  esac
+}
 
 # Per-pack limits, shared by both pack kinds. Zip: checked from the archive's directory before
 # extraction, and enforced again per file during extraction (ulimit) in case the directory lies.
@@ -69,7 +100,8 @@ MAX_PACK_ENTRIES=500
 
 # download <url> <out> [max bytes]: curl exits 63 when the file is larger than the max.
 # Redirects are https only, always (even when the test hook allows file:// for the first hop).
-download() { curl -fsSL --proto "$PROTO" --proto-redir "=https" --max-filesize "${3:-$MAX_PACK_BYTES}" -m 120 -A "Mozilla/5.0" "$1" -o "$2"; }
+# --globoff: file names like `[.wav` are names, not curl URL ranges.
+download() { curl -fsSL -g --proto "$PROTO" --proto-redir "=https" --max-filesize "${3:-$MAX_PACK_BYTES}" -m 120 -A "Mozilla/5.0" "$1" -o "$2"; }
 
 # Rejects archives over MAX_PACK_ENTRIES entries or MAX_PACK_BYTES uncompressed.
 zip_within_limits() {
@@ -119,7 +151,12 @@ fetch_pack() {
     return 1
   }
   [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { fail "no sha256 pinned in the manifest"; return 1; }
-  if [[ "$FORCE" != "--force" && -s "$final/pack.json" ]] && grep -q "\"sha256\":\"$sha\"" "$final/pack.json"; then
+  # Kept only while both the download pin and the map match: a map change on the same download
+  # (say a new `sc:` class added to a zip already installed) must refetch, or the new files
+  # never land.
+  local mapsum; mapsum="$(printf '%s' "$map" | sha256)" || { fail "cannot hash the map"; return 1; }
+  if [[ "$FORCE" != "--force" && -s "$final/pack.json" ]] && grep -q "\"sha256\":\"$sha\"" "$final/pack.json" \
+     && grep -q "\"map_sha256\":\"$mapsum\"" "$final/pack.json"; then
     echo "keep    $id ($tier)"; return 0
   fi
   mkdir -p "$stage" || { fail "cannot create $stage"; return 1; }
@@ -151,7 +188,7 @@ fetch_pack() {
   fi
   for entry in "${entries[@]}"; do
     cls="${entry%%:*}"; spec="${entry#*:}"; n=0
-    [[ "$cls" =~ ^(key|space|enter|backspace)$ ]] || { fail "unknown class '$cls' in map"; return 1; }
+    [[ "$cls" =~ $CLASS_RE ]] || { fail "unknown class '$cls' in map"; return 1; }
     if [[ -n "$root" ]]; then
       while IFS= read -r f; do
         [[ -n "$f" ]] || continue
@@ -160,21 +197,25 @@ fetch_pack() {
         local real; real="$(real_path "$f")" || { fail "cannot resolve ${f#"$root"/}"; return 1; }
         [[ "$real" == "$root"/* ]] || { fail "outside the archive: ${f#"$root"/}"; return 1; }
         is_audio "$f" || { fail "not an audio file: ${f#"$root"/}"; return 1; }
-        n=$((n+1)); ext="${f##*.}"
-        cp "$real" "$stage/$(printf '%s-%02d' "$cls" "$n").$ext" || { fail "copy failed"; return 1; }
+        n=$((n+1))
+        out="$(out_name "$cls" "$n" "$f")" || { fail "$cls: cannot name ${f#"$root"/} (sc needs <number>.<ext>; sc<N> takes one file)"; return 1; }
+        [[ ! -e "$stage/$out" ]] || { fail "$cls: two files map to $out"; return 1; }
+        cp "$real" "$stage/$out" || { fail "copy failed"; return 1; }
       done < <(compgen -G "$root/$spec" | LC_ALL=C sort)
     else
       IFS=',' read -ra files <<<"$spec"
       for f in "${files[@]}"; do
         is_audio "$f" || { fail "not an audio file: $f"; return 1; }
-        case "$f" in */*|..*) fail "file names must not contain paths: $f"; return 1 ;; esac
-        n=$((n+1)); ext="${f##*.}"
-        out="$stage/$(printf '%s-%02d' "$cls" "$n").$ext"
+        safe_name "$f" || { fail "unsafe file name: $f (one subfolder at most, no dot segments)"; return 1; }
+        n=$((n+1))
+        out="$(out_name "$cls" "$n" "$f")" || { fail "$cls: cannot name $f (sc needs <number>.<ext>; sc<N> takes one file)"; return 1; }
+        [[ ! -e "$stage/$out" ]] || { fail "$cls: two files map to $out"; return 1; }
+        out="$stage/$out"
         # Each download may use only what is left of the pack's byte budget (curl stops at it
         # when the size is known), and the running total is checked after every file.
         budget=$((MAX_PACK_BYTES - total))
         (( budget > 0 )) || { fail "file list over $MAX_PACK_BYTES bytes in total, not installed"; return 1; }
-        download "$url${f// /%20}" "$out" "$budget"; rc=$?
+        download "$url$(url_name "$f")" "$out" "$budget"; rc=$?
         (( rc != 63 )) || { fail "file list over $MAX_PACK_BYTES bytes in total, not installed"; return 1; }
         (( rc == 0 )) || { fail "download failed ($url$f)"; return 1; }
         size="$(wc -c <"$out" | tr -d ' ')" || { fail "cannot size $f"; return 1; }
@@ -192,8 +233,8 @@ fetch_pack() {
   fi
 
   [[ "$attribution" == "-" ]] && attribution=""
-  printf '{"id":%s,"name":%s,"license":%s,"tier":%s,"attribution":%s,"source":%s,"sha256":%s}\n' \
-    "$(json "$id")" "$(json "$name")" "$(json "$license")" "$(json "$tier")" "$(json "$attribution")" "$(json "$source")" "$(json "$sha")" \
+  printf '{"id":%s,"name":%s,"license":%s,"tier":%s,"attribution":%s,"source":%s,"sha256":%s,"map_sha256":%s}\n' \
+    "$(json "$id")" "$(json "$name")" "$(json "$license")" "$(json "$tier")" "$(json "$attribution")" "$(json "$source")" "$(json "$sha")" "$(json "$mapsum")" \
     > "$stage/pack.json" || { fail "cannot write pack.json"; return 1; }
 
   # Install: copy next to the final folder as <id>.part (Navi ignores *.part), then swap by

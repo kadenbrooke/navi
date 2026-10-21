@@ -51,6 +51,9 @@ public enum MenubarDropdown {
     public static func visibilityTitle(hidden: Bool) -> String { hidden ? "Show Navi" : "Hide Navi" }
     public static func sleepTitle(sleeping: Bool) -> String { sleeping ? "Wake Navi" : "Sleep Navi" }
 
+    /// Hover text for the Sound item (fairy menu and dropdown): it covers her chimes only.
+    public static let soundTooltip = "Navi's state and menu chimes. Typing sounds have their own switch."
+
     /// Names the harness and window closest to its limit: `Quota · Cursor (cycle) 100%`, or
     /// `Quota · Codex blocked` when one is blocked (`+1` when more are). `Quota usage` with
     /// nothing to say. Error rows have no numbers and never count.

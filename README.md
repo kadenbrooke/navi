@@ -41,8 +41,8 @@ export NAVI_REPO=~/code/my-project
 ```
 
 `install.sh` builds the app in release mode, wraps it as `~/Applications/Navi.app` (no Dock
-icon, ad-hoc signed), and loads two per-user launchd agents whose paths point at **this
-clone**:
+icon, signed locally, see [Code signing](#code-signing)), and loads two per-user launchd
+agents whose paths point at **this clone**:
 
 | Agent | Runs | Log |
 |---|---|---|
@@ -67,6 +67,33 @@ into both agents. Change one → re-run `./install.sh`.
 | `NAVI_NODE` | auto-detect | Node binary for the collector. |
 | `NAVI_NOTIFY_CMD` | *(unset)* | Shell command run when a thread starts needing you (reviewed PR waiting on your merge, branch gone stale). The message is `"$1"`, e.g. `NAVI_NOTIFY_CMD='terminal-notifier -message "$1"'`. |
 | `NAVI_NO_USAGE` | *(unset)* | `1` = never poll quota providers; the usage page stays empty. |
+
+### Code signing
+
+macOS ties the Input Monitoring grant (needed for [typing sounds](#typing-sounds-and-typing-speed))
+to the app's code signature. An ad-hoc signature changes with every build, so with ad-hoc
+signing you have to grant Input Monitoring again after each reinstall. To avoid that,
+`install.sh` signs with a stable identity when your Mac has one:
+
+1. `NAVI_SIGN_IDENTITY` set → it signs with that identity (`-` forces ad-hoc). If that fails,
+   the install stops with an error.
+2. Otherwise it picks the first valid **Apple Development** identity in your keychain
+   (`security find-identity -v -p codesigning`, which only lists and never prompts). Create one
+   for free in Xcode → Settings → Accounts → Manage Certificates.
+3. No such identity, or signing with it fails → ad-hoc signing, with a note that Input
+   Monitoring will reset on each install.
+
+Nothing is hardcoded: no identity or team ID ships in this repo. Each `codesign` call is cut
+off after `NAVI_SIGN_TIMEOUT` seconds (default 20), so a Keychain access prompt left
+unanswered can never stall the install; it just falls back to ad-hoc. The first install with a
+stable identity needs one last re-grant (toggle Navi off and on under Input Monitoring); after
+that, reinstalls keep it. These two variables are read at install time only and are not
+baked into the agents.
+
+```bash
+security find-identity -v -p codesigning          # list the identities you have
+NAVI_SIGN_IDENTITY="<one of them>" ./install.sh    # use a particular one
+```
 
 ## What Navi reads
 
@@ -213,7 +240,8 @@ her (`pkill -x Navi`; launchd brings her back):
 Each name takes any of `.wav` `.aiff` `.aif` `.caf` `.m4a` `.mp3` (e.g. `navi-in.wav`).
 Any you leave out stay silent; the menubar menu shows how many are missing. The repo's
 `.gitignore` blocks audio files, so clips you experiment with inside the clone are never
-committed — only use sounds you have the right to use.
+committed — only use sounds you have the right to use. *Sound* in the right-click or menubar
+menu turns these chimes off; typing sounds have their own switch (below).
 
 ## Typing sounds and typing speed
 
@@ -225,14 +253,49 @@ app) and shows your typing speed in the dropdown, right under the toggle:
 - **Live WPM** counts the presses of the last 10 s (a word = 5 presses); it reads 0 after a
   3 s pause. **Today best** is the highest live WPM of a burst that ran a full 10 s; **avg** is
   today's presses over today's typing time (pauses over 3 s are not typing time). Both reset at
-  local midnight and survive a relaunch. Held keys (auto-repeat) are ignored; ⌘ / ⌃ shortcuts
-  click but do not count.
+  local midnight and survive a relaunch. A held key clicks once and its auto-repeat neither
+  clicks nor counts; the key of a ⌘ / ⌃ shortcut (the C in ⌘C) clicks but does not count.
+- **Every key sounds like itself.** Each key has its own sound: the pack's recording of that
+  key where it has one (a per-key pack); else the nearest key that has a recording, a little
+  off its pitch (wide keys and modifiers borrow only from wide keys such as shift, return or
+  space, never from a letter; an arrow or F-key borrows a key near it); else its keyboard
+  row's recording (a per-row pack); or else a fixed pick from the pack's recordings at a fixed
+  small pitch offset, so the same key always sounds the same and neighbours differ. Space,
+  enter and backspace keep their own sounds. The two packs `install.sh` fetches have generic
+  recordings only, so they use that last, fixed pick: every key still has its own stable sound.
+- **Key-up sounds and stereo.** Letting go of a key plays a softer **release** (the pack's
+  key-up recording, or one derived from that key's press); holding a key gives one press and
+  one release, never a stream. Each key is placed **left to right** by its column on a Mac
+  keyboard (space centred, at most ±0.3 pan, gentle on headphones).
+- **Every key clicks**, not only letters: shift, ⌃, ⌥, ⌘, fn and caps lock on their own (one
+  press when the key goes down, one release when it comes up; caps lock reports no key-up, so
+  its release follows 90 ms after the press), F1–F12 in their default media mode (brightness,
+  volume, play… click as the F-key they are printed on, however macOS reports them: a media
+  event, a legacy key code, or both at once still click once; a fast double tap is two
+  clicks), arrows, the nav block and the keypad. In a shortcut each key is its own click
+  (⌘C = ⌘ once, C once); auto-repeat never stacks. A modifier whose key-up macOS never
+  delivered (an app switch, a password field) is forgotten without a stray click. Modifiers
+  and media keys never count toward WPM.
 - **Typing sound ▸** picks the profile (pack name · license; hover for attribution), holds the
-  volume slider and *Open typing sounds folder*. A change plays one preview click. Settings
-  persist (`keySounds` in her defaults).
-- **Mutes**: *Sound* off silences clicks too, and a hidden Navi plays nothing (same rule as her
-  other sounds). Asleep is not muted. While a password field has secure input on, macOS sends
-  no key events at all, so clicks and counting pause by themselves; the dropdown says so.
+  volume slider, **Quiet on calls** and *Open typing sounds folder*. A ★ after a pack's name
+  marks a pack with its own real recording for every key of a standard Mac keyboard, fn
+  excluded (fn is laptop-only and no pack records it). The star is worked out from the pack's
+  files, so a pack you add earns it by itself, and once the pack has been played, from the
+  recordings that actually decoded. Neither public pack has per-key recordings, so out of the
+  box no pack is starred. A change plays one preview click. Settings persist (`keySounds` in
+  her defaults).
+- **Quiet on calls** (on by default): no clicks while any app is using a microphone (a call,
+  dictation); they come back when it stops, and the dropdown says *quiet · a microphone is in
+  use* meanwhile. WPM still counts. Navi never asks for microphone permission and never opens
+  a microphone: she asks CoreAudio which apps are running audio input and whether their input
+  device is actually running (`MicMonitor.swift`, rule `MicActivity` in PetCore). The second
+  check keeps an always-on voice-assistant listener, which reports input all the time, from
+  muting her.
+- **Its own switch**: *Typing sounds* alone turns clicks on and off. The *Sound* switch covers
+  her state and menu chimes only, so clicks play with *Sound* off, and they keep playing (and
+  counting) while Navi is hidden or asleep. While a password field has secure input on, macOS
+  sends no key events at all, so clicks and counting pause by themselves (nothing plays then,
+  press or release); the dropdown says so.
 
 **Permission: Input Monitoring.** Hearing keys typed in other apps needs it. The first time you
 turn the feature on, macOS asks; if you dismiss that, the dropdown shows *needs Input
@@ -240,21 +303,31 @@ Monitoring permission* and *Open Input Monitoring settings…*: switch Navi on u
 Settings → Privacy & Security → Input Monitoring. She retries every 2 s and starts listening
 once the grant is visible to her; if the note stays after you switched her on, restart her
 (`pkill -x Navi`, launchd brings her back). Denied or never granted, everything else in Navi
-works as before. The grant is tied to the app's code signature and `install.sh` signs ad hoc,
-so after a reinstall macOS may treat her as a new app: if clicks stop, toggle Navi off and on
-in that list.
+works as before. The grant is tied to the app's code signature: with a stable signing
+identity it survives reinstalls; with ad-hoc signing macOS may treat her as a new app after a
+reinstall, so if clicks stop, toggle Navi off and on in that list. See
+[Code signing](#code-signing).
 
-**Privacy.** Which key you pressed is never stored, logged or sent. The listen-only event tap
-(`app/Sources/BuildThreadsPet/KeyListener.swift`) hands each key-down to `KeyEventFilter`,
-which reduces it on the spot to a coarse class (space / enter / backspace / other) used only
-to pick a sample. The WPM meter takes only the time of a press, and what is saved is today's
-counts: `day`, `keystrokes`, `activeSeconds`, `bestWPM`. `KeyPrivacyTests` proves the saved
-bytes are identical whichever keys were typed. While the feature is off nothing listens and
-no audio engine exists.
+**Privacy.** Which key you pressed is never stored, logged or sent. The key code is used in
+memory only, to pick that key's sound and its left/right position; saved data stays counts and
+durations only. In practice: the listen-only event tap
+(`app/Sources/BuildThreadsPet/KeyListener.swift`) hands each key-down, key-up, modifier flag
+change and media-key event to `KeySoundController`; `KeyStrokeRouter` turns them into one
+physical key down or up (holding only the current press of each modifier / caps lock / top-row
+key, which sources reported its down and up in the last 30 ms, dropped once that has passed,
+and whether caps lock is locked). The controller uses the key code as an index into tables
+worked out when the pack loaded (`KeySoundPlan`) and in a held-keys set (one bit per key) that
+pairs a release with its press (`KeyPairing`), then drops it. The WPM meter takes only the
+time of a press, and what is saved is today's counts: `day`, `keystrokes`, `activeSeconds`,
+`bestWPM`, plus the settings (on/off, profile, volume, quiet on calls). `KeyPrivacyTests` runs
+the same path and proves the saved bytes are identical whichever keys were typed. While the
+feature is off nothing listens and no audio engine exists.
 
 **Latency.** Every sample is decoded once, off the main thread, into a preloaded buffer
-(leading silence trimmed, loudness evened out per pack) and played on a pool of 10
-`AVAudioEngine` voices, so fast typing overlaps clicks. The engine pauses after 2 idle
+(leading silence trimmed, loudness evened out per pack), and each key's press sound, release
+sound and pan are worked out at load into flat per-key-code tables, so a press is one array
+lookup. Clicks play on a pool of 10 `AVAudioEngine` voices, so fast typing overlaps them. A
+press costs well under a millisecond on the main thread. The engine pauses after 2 idle
 minutes; the first click after that is ~150 ms late. Engine calls go through a small
 Objective-C exception guard (`app/Sources/ObjCGuard`), so a dropped audio device costs a
 click, never a crash.
@@ -285,14 +358,23 @@ sound ▸* → *Open typing sounds folder*):
 
 ```
 ~/Library/Application Support/Navi/keysounds/my-pack/
-  key-01.wav key-02.wav …       ordinary keys (required)
-  space-01.wav enter-01.wav backspace-01.wav   optional; missing classes use the key samples
+  key-01.wav key-02.wav …       generic key presses
+  sc30.wav sc31.wav …           one key's own press, by PC set-1 scancode (30 = A), as
+                                Mechvibes-style packs name them
+  row0-01.wav … row4-01.wav     presses per keyboard row (0 = number/F row … 4 = space row)
+  space-01.wav enter-01.wav backspace-01.wav   optional; space / enter / backspace keep their own
+  up-key-01.wav …               optional key-up recordings (also up-space- / up-enter- /
+                                up-backspace-); without them releases are derived from the press
   pack.json                     optional: {"name":"My Pack","license":"CC0","attribution":"…"}
 ```
 
+A pack needs at least one press (`key-`, `sc` or `row` files). Record every key of a standard
+Mac keyboard (`sc` files plus space / enter / backspace) and it gets the ★.
+
 or add a line to `keysounds/packs-local.tsv` (same columns as `packs-public.tsv`, sha256
 required, git-ignored) and run `bash keysounds/fetch-keysounds.sh local`. Any format CoreAudio
-reads works (`.wav` `.aiff` `.aif` `.caf` `.m4a` `.mp3` `.flac`), up to 32 variants per class.
+reads works (`.wav` `.aiff` `.aif` `.caf` `.m4a` `.mp3` `.flac`), up to 32 variants per class
+and 160 per-key files.
 The new pack shows the next time you open the dropdown, labelled `· local`. Only use sounds
 you have the right to use. Manifest format and the fetcher's safety rules:
 [`keysounds/README.md`](keysounds/README.md).

@@ -54,6 +54,7 @@ final class KeySoundsTests: XCTestCase {
         XCTAssertFalse(s.enabled, "off until turned on")
         XCTAssertNil(s.profile)
         XCTAssertEqual(s.volume, 0.5)
+        XCTAssertTrue(s.quietOnCalls, "quiet on calls defaults on")
     }
 
     func testSettingsPersistAcrossRestart() {
@@ -78,14 +79,17 @@ final class KeySoundsTests: XCTestCase {
 
     // MARK: gate
 
-    func testGate() {
-        XCTAssertTrue(KeySoundGate.shouldPlay(enabled: true, soundOn: true, hidden: false))
-        XCTAssertFalse(KeySoundGate.shouldPlay(enabled: false, soundOn: true, hidden: false))
-        XCTAssertFalse(KeySoundGate.shouldPlay(enabled: true, soundOn: false, hidden: false), "master Sound off silences clicks too")
-        XCTAssertFalse(KeySoundGate.shouldPlay(enabled: true, soundOn: true, hidden: true), "hidden means nothing plays")
-        XCTAssertNil(KeySoundGate.muteReason(soundOn: true, hidden: false))
-        XCTAssertEqual(KeySoundGate.muteReason(soundOn: false, hidden: true), "muted · Sound is off")
-        XCTAssertEqual(KeySoundGate.muteReason(soundOn: true, hidden: true), "muted · Navi is hidden")
+    func testGateTypingToggleAloneControlsClicks() {
+        XCTAssertTrue(KeySoundGate.shouldPlay(enabled: true, soundOn: true, hidden: false, quietOnCalls: true, micInUse: false))
+        XCTAssertTrue(KeySoundGate.shouldPlay(enabled: true, soundOn: false, hidden: false, quietOnCalls: true, micInUse: false), "master Sound off does not mute clicks")
+        XCTAssertTrue(KeySoundGate.shouldPlay(enabled: true, soundOn: true, hidden: true, quietOnCalls: true, micInUse: false), "a hidden Navi still clicks")
+        XCTAssertTrue(KeySoundGate.shouldPlay(enabled: true, soundOn: false, hidden: true, quietOnCalls: true, micInUse: false), "Sound off and hidden together still click")
+        for soundOn in [false, true] {
+            for hidden in [false, true] {
+                XCTAssertFalse(KeySoundGate.shouldPlay(enabled: false, soundOn: soundOn, hidden: hidden, quietOnCalls: true, micInUse: false),
+                               "Typing sounds off: no click (sound \(soundOn), hidden \(hidden))")
+            }
+        }
     }
 
     // MARK: polyphony + variants
@@ -128,13 +132,13 @@ final class KeySoundsTests: XCTestCase {
         var last = -1
         var seen = Set<Int>()
         for _ in 0..<500 {
-            let i = picker.pick(.other, count: 4, using: &rng)
+            let i = picker.pick(0, count: 4, using: &rng)
             XCTAssertTrue((0..<4).contains(i))
             XCTAssertNotEqual(i, last)
             last = i; seen.insert(i)
         }
         XCTAssertEqual(seen, [0, 1, 2, 3], "every variant gets used")
-        XCTAssertEqual(picker.pick(.space, count: 1, using: &rng), 0)
+        XCTAssertEqual(picker.pick(1, count: 1, using: &rng), 0)
     }
 
     // MARK: trim + synth

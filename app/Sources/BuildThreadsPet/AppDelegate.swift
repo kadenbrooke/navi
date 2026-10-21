@@ -367,6 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.addItem(withTitle: sleepTimer.sleeping ? "Wake Navi  ⌥⌘P" : "Sleep Navi  ⌥⌘P", action: #selector(menuToggleSleep), keyEquivalent: "").target = self
         let snd = NSMenuItem(title: "Sound", action: #selector(toggleSound), keyEquivalent: "")
         snd.target = self; snd.state = config.params.sound ? .on : .off
+        snd.toolTip = MenubarDropdown.soundTooltip
         m.addItem(snd)
         m.addItem(idleNotifyItem())
         m.addItem(.separator())
@@ -430,6 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.addItem(.sectionHeader(title: "Settings"))
         let snd = NSMenuItem(title: "Sound", action: #selector(toggleSound), keyEquivalent: "")
         snd.target = self; snd.state = config.params.sound ? .on : .off
+        snd.toolTip = MenubarDropdown.soundTooltip
         m.addItem(snd)
         m.addItem(idleNotifyItem())
         for item in keySounds.menuItems() { m.addItem(item) }

@@ -103,6 +103,18 @@ check "no staging leftovers in the packs folder" '[[ -z "$(ls -d "$DEST"/*.part 
 out="$(run public)"
 check "second run keeps a verified install" 'echo "$out" | grep -q "keep    good (public)"'
 
+# A map change on the same pinned download (a new class added to a zip already installed)
+# refetches, so the new files land; the map's hash is recorded.
+check "pack.json records the map's hash" 'grep -q "\"map_sha256\":\"$(printf %s "key:pack/key-*.wav" | shasum -a 256 | cut -d" " -f1)\"" "$DEST/good/pack.json"'
+sed -i '' "s|key:pack/key-\*.wav$|key:pack/key-a.wav|" "$MAN/packs-public.tsv"
+out="$(run public)"
+check "map change on the same download refetches" 'echo "$out" | grep -q "fetch   good (public" && [[ -f "$DEST/good/key-01.wav" && ! -e "$DEST/good/key-02.wav" ]]'
+out="$(run public)"
+check "unchanged map keeps it again" 'echo "$out" | grep -q "keep    good (public)"'
+sed -i '' "s|key:pack/key-a.wav$|key:pack/key-*.wav|" "$MAN/packs-public.tsv"
+out="$(run public)"
+check "map restored: refetched with both files" '[[ -f "$DEST/good/key-01.wav" && -f "$DEST/good/key-02.wav" ]]'
+
 # A pin change (say a pack updated upstream) refetches; a failed refetch keeps the old copy.
 printf 'old' > "$DEST/good/marker"
 sed -i '' "s/$(sha "$FIX/good.zip")/$(printf 'a%.0s' {1..64})/" "$MAN/packs-public.tsv"
@@ -150,6 +162,41 @@ check "bad ids: ../ /abs a/b .hidden Upper space -lead and 65 chars all named" '
 check "bad ids: sentinel outside the temp dir survives" '[[ "$(cat "$SENTINEL")" == "keep me" ]]'
 check "bad ids: nothing written outside the packs folder" '[[ ! -e "$(dirname "$W")/evil.zip" && ! -e /abs && ! -e "$DEST2/a" && -z "$(ls -A "$DEST2" | grep -v "^bbbb")" ]]'
 check "a 64-character id is still valid" '[[ -f "$DEST2/$(printf "b%.0s" {1..64})/key-01.wav" ]]'
+
+# Per-key, per-row and key-up classes, in their own folders.
+MAN3="$W/manifests3"; DEST3="$W/dest3"
+mkdir -p "$MAN3" "$DEST3" "$FIX/sub/press" "$FIX/sub/release"
+python3 -I - "$FIX" <<'PY'
+import os, sys, zipfile
+fix = sys.argv[1]
+with zipfile.ZipFile(os.path.join(fix, "perkey.zip"), "w") as zf:
+    for n in ("2", "16", "57", "3640"): zf.writestr("pack/%s.wav" % n, b"RIFF-" + n.encode())
+    zf.writestr("pack/up.wav", b"RIFF-up"); zf.writestr("pack/config.json", b"{}")
+with zipfile.ZipFile(os.path.join(fix, "badsc.zip"), "w") as zf:
+    zf.writestr("pack/16.wav", b"R"); zf.writestr("pack/q.wav", b"R")
+PY
+printf 'r0' > "$FIX/sub/press/R0.mp3"; printf 'g' > "$FIX/sub/release/G.mp3"; printf 'br' > "$FIX/sub/[.wav"; printf 'cl' > "$FIX/sub/caps lock.wav"
+SUBSHA="$(cat "$FIX/sub/press/R0.mp3" "$FIX/sub/release/G.mp3" "$FIX/sub/[.wav" "$FIX/sub/caps lock.wav" | shasum -a 256 | cut -d' ' -f1)"
+{
+  row perkey  "$U/perkey.zip" "$(sha "$FIX/perkey.zip")" "key:pack/16.wav;sc:pack/[0-9]*.wav;space:pack/57.wav;up-key:pack/up.wav"
+  row badsc   "$U/badsc.zip"  "$(sha "$FIX/badsc.zip")"  "sc:pack/*.wav"
+  row rawsub  "$U/sub/" "$SUBSHA" "row0:press/R0.mp3;up-key:release/G.mp3;sc26:[.wav;sc58:caps lock.wav"
+  row dots    "$U/sub/" "$SUBSHA" "key:../a.wav"
+  row deep    "$U/sub/" "$SUBSHA" "key:press/x/R0.mp3"
+  row row5    "$U/sub/" "$SUBSHA" "row5:press/R0.mp3"
+  row sctwo   "$U/raw/" "$RAWSHA" "sc16:a.wav,b.mp3"
+} > "$MAN3/packs-public.tsv"
+out="$(NAVI_KEYSOUNDS_MANIFESTS="$MAN3" NAVI_KEYSOUNDS_DIR="$DEST3" NAVI_KEYSOUNDS_ALLOW_FILE_URLS=1 "$RUNNER" "$SCRIPT" public 2>&1)"; code=$?
+echo "$out" | sed 's/^/      | /'
+check "sc: every <number>.wav in a zip lands as sc<number>.wav" '[[ -f "$DEST3/perkey/sc2.wav" && -f "$DEST3/perkey/sc16.wav" && -f "$DEST3/perkey/sc57.wav" && -f "$DEST3/perkey/sc3640.wav" && "$(cat "$DEST3/perkey/sc16.wav")" == RIFF-16 ]]'
+check "sc pack: generic, class and key-up files beside it, nothing else" '[[ "$(ls "$DEST3/perkey" | tr "\n" " ")" == "key-01.wav pack.json sc16.wav sc2.wav sc3640.wav sc57.wav space-01.wav up-key-01.wav " ]]'
+check "sc: a non-numeric name fails the pack" 'echo "$out" | grep -q "FAILED  badsc: sc: cannot name" && [[ ! -e "$DEST3/badsc" ]]'
+check "file list: one subfolder, rows, key-up, [ and spaces in names" '[[ "$(cat "$DEST3/rawsub/row0-01.mp3")" == r0 && "$(cat "$DEST3/rawsub/up-key-01.mp3")" == g && "$(cat "$DEST3/rawsub/sc26.wav")" == br && "$(cat "$DEST3/rawsub/sc58.wav")" == cl ]]'
+check "file list: dot segments rejected" 'echo "$out" | grep -q "FAILED  dots: unsafe file name: ../a.wav" && [[ ! -e "$DEST3/dots" ]]'
+check "file list: two subfolders rejected" 'echo "$out" | grep -q "FAILED  deep: unsafe file name" && [[ ! -e "$DEST3/deep" ]]'
+check "unknown class (row5) rejected" 'echo "$out" | grep -q "FAILED  row5: unknown class" && [[ ! -e "$DEST3/row5" ]]'
+check "sc<N> takes exactly one file" 'echo "$out" | grep -q "FAILED  sctwo: sc16: cannot name" && [[ ! -e "$DEST3/sctwo" ]]'
+check "new classes: summary and exit status" 'echo "$out" | grep -q "done: 2 ok, 5 failed (badsc dots deep row5 sctwo)" && [[ $code -ne 0 ]]'
 
 echo "$pass passed, $failn failed ($RUNNER)"
 [[ $failn -eq 0 ]]

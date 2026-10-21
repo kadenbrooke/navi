@@ -22,6 +22,9 @@
 #   NAVI_NODE           node binary for the collector (default: auto-detect, needs Node >= 22.13)
 #   NAVI_NOTIFY_CMD     optional shell command run for "needs you" changes, line in "$1"
 #   NAVI_NO_USAGE=1     skip the quota-usage page's provider polling
+#   NAVI_SIGN_IDENTITY  codesign identity for Navi.app (default: this Mac's first Apple Development
+#                       identity, else ad-hoc; `-` forces ad-hoc). Not baked into the agents.
+#   NAVI_SIGN_TIMEOUT   seconds before a codesign call is given up on (default 20)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +44,7 @@ case "${1:-}" in
   --dry-run) MODE="dry-run" ;;
   --stop) MODE="stop" ;;
   --uninstall) MODE="uninstall" ;;
-  -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
   *) echo "unknown option: $1 (try --help)"; exit 2 ;;
 esac
 
@@ -196,8 +199,51 @@ rm -rf "$DEST"
 mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BIN" "$DEST/Contents/MacOS/$APP_NAME"
 info_plist > "$DEST/Contents/Info.plist"
-# Ad-hoc sign so launch-at-login (SMAppService) and Gatekeeper are happy locally.
-codesign --force --sign - "$DEST" >/dev/null 2>&1 || echo "  (codesign skipped)"
+# Sign so launch-at-login (SMAppService) and Gatekeeper are happy locally. Prefer a stable
+# Apple Development identity from this Mac's keychain: macOS ties the Input Monitoring grant
+# (typing sounds) to the signature, and an ad-hoc signature changes on every build, so the grant
+# would have to be given again after each reinstall. No identity is ever hardcoded: the first
+# valid "Apple Development:" identity is picked (`security find-identity` only lists, it never
+# prompts), or NAVI_SIGN_IDENTITY names one (`-` = ad-hoc). Each codesign call is cut off after
+# NAVI_SIGN_TIMEOUT seconds (default 20), so a Keychain access prompt can never stall the
+# install: a detected identity that fails or times out falls back to ad-hoc signing.
+SIGN_TIMEOUT="${NAVI_SIGN_TIMEOUT:-20}"
+sign_bundle() {
+  local identity="$1"
+  perl -e 'alarm shift; exec @ARGV' "$SIGN_TIMEOUT" \
+    codesign --force --timestamp=none --sign "$identity" "$DEST" </dev/null >/dev/null 2>&1 \
+    && perl -e 'alarm shift; exec @ARGV' "$SIGN_TIMEOUT" \
+      codesign --verify --deep --strict "$DEST" </dev/null >/dev/null 2>&1
+}
+
+sign_ad_hoc() {
+  if ! sign_bundle "-"; then
+    echo "ERROR: ad-hoc codesigning failed or timed out; $APP_NAME was not installed." >&2
+    exit 1
+  fi
+}
+
+ADHOC_NOTE="Input Monitoring (typing sounds) will have to be granted again after each reinstall. Set NAVI_SIGN_IDENTITY to a usable identity, or create an Apple Development certificate in Xcode (Settings → Accounts)."
+if [ -n "${NAVI_SIGN_IDENTITY:-}" ]; then
+  echo "→ signing with NAVI_SIGN_IDENTITY"
+  if ! sign_bundle "$NAVI_SIGN_IDENTITY"; then
+    echo "ERROR: NAVI_SIGN_IDENTITY could not sign $APP_NAME.app or verification failed; $APP_NAME was not installed." >&2
+    exit 1
+  fi
+else
+  SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '$0 ~ /"Apple Development:/ { print $2; exit }' || true)"
+  if [ -n "$SIGNING_IDENTITY" ]; then
+    echo "→ signing with this Mac's Apple Development identity"
+    if ! sign_bundle "$SIGNING_IDENTITY"; then
+      echo "WARNING: signing with the Apple Development identity failed or timed out (a Keychain prompt left unanswered?); falling back to ad-hoc signing. $ADHOC_NOTE" >&2
+      sign_ad_hoc
+    fi
+  else
+    echo "note: no Apple Development signing identity found; using ad-hoc signing. $ADHOC_NOTE" >&2
+    sign_ad_hoc
+  fi
+fi
 
 echo "→ fetching typing-sound packs (CC0 / CC-BY, sha256-pinned; audio stays on this Mac, never committed)"
 if ! bash "$ROOT/keysounds/fetch-keysounds.sh"; then

@@ -65,6 +65,35 @@ final class SoundPackTests: XCTestCase {
         XCTAssertEqual(SoundPackLibrary.scan(dir).first?.samples[.other]?.count, SoundPackLibrary.maxVariants)
     }
 
+    /// The committed public manifest: each id safe as a folder name, names unique, every download
+    /// pinned, and every map class one the fetch script and the scanner know. Reads
+    /// keysounds/packs-public.tsv from the repo.
+    func testPublicManifestIsClean() throws {
+        let keysounds = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("keysounds", isDirectory: true)
+        let text = try String(contentsOf: keysounds.appendingPathComponent("packs-public.tsv"), encoding: .utf8)
+        var ids: [String] = [], names: [String] = []
+        for line in text.split(separator: "\n") where !line.hasPrefix("#") && !line.isEmpty {
+            let c = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            XCTAssertEqual(c.count, 8, "8 tab-separated columns: \(line)")
+            guard c.count == 8 else { continue }
+            let (id, name, url, sha, map) = (c[0], c[1], c[5], c[6], c[7])
+            XCTAssertNotNil(id.range(of: #"^[a-z0-9][a-z0-9-]{0,63}$"#, options: .regularExpression), "id: \(id)")
+            XCTAssertNotNil(sha.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression), "sha256 pin: \(id)")
+            XCTAssertTrue(url.hasPrefix("https://"), "https only: \(id)")
+            let classes = map.split(separator: ";").map { String($0.split(separator: ":")[0]) }
+            XCTAssertTrue(classes.contains { $0 == "key" || $0.hasPrefix("row") || $0.hasPrefix("sc") }, "press samples mapped: \(id)")
+            for c in classes {
+                XCTAssertNotNil(c.range(of: #"^(key|space|enter|backspace|up-key|up-space|up-enter|up-backspace|row[0-4]|sc|sc[0-9]{1,5})$"#,
+                                        options: .regularExpression), "known map class \(c): \(id)")
+            }
+            ids.append(id); names.append(name)
+        }
+        XCTAssertFalse(ids.isEmpty, "the public manifest lists packs")
+        XCTAssertEqual(Set(ids).count, ids.count, "duplicate pack id")
+        XCTAssertEqual(Set(names.map { $0.lowercased() }).count, names.count, "duplicate pack name")
+    }
+
     func testResolveFallsBack() {
         let a = SoundPack(id: "a", name: "A", license: "CC0", tier: .public, samples: [.other: [URL(fileURLWithPath: "/a")]])
         let b = SoundPack(id: "b", name: "B", license: "x", tier: .local, samples: [.other: [URL(fileURLWithPath: "/b")]])
@@ -96,23 +125,25 @@ final class SoundPackTests: XCTestCase {
                        "⌨ 72 wpm · today best 95 · avg 60")
         XCTAssertEqual(TypingMenu.wpmLine(live: 30, today: TypingStats(day: "d", keystrokes: 8, activeSeconds: 2)), "⌨ 30 wpm · 8 keys today")
 
-        XCTAssertNil(TypingMenu.statusNote(enabled: false, listener: .off, secureInput: true, muteReason: "x"), "off: nothing to say")
-        XCTAssertEqual(TypingMenu.statusNote(enabled: true, listener: .needsPermission, secureInput: false, muteReason: nil),
+        XCTAssertNil(TypingMenu.statusNote(enabled: false, listener: .off, secureInput: true), "off: nothing to say")
+        XCTAssertEqual(TypingMenu.statusNote(enabled: true, listener: .needsPermission, secureInput: false),
                        "needs Input Monitoring permission")
-        XCTAssertEqual(TypingMenu.statusNote(enabled: true, listener: .running, secureInput: true, muteReason: nil),
+        XCTAssertEqual(TypingMenu.statusNote(enabled: true, listener: .running, secureInput: true),
                        "paused · a password field has secure input on")
-        XCTAssertEqual(TypingMenu.statusNote(enabled: true, listener: .running, secureInput: false, muteReason: "muted · Navi is hidden"),
-                       "muted · Navi is hidden")
-        XCTAssertNil(TypingMenu.statusNote(enabled: true, listener: .running, secureInput: false, muteReason: nil))
+        XCTAssertNil(TypingMenu.statusNote(enabled: true, listener: .running, secureInput: false))
     }
 
     func testStatsRowShowsEvenWithoutPermission() {
-        XCTAssertEqual(TypingMenu.rows(enabled: false, listener: .off, secureInput: false, muteReason: nil), [])
-        XCTAssertEqual(TypingMenu.rows(enabled: true, listener: .needsPermission, secureInput: false, muteReason: nil),
+        XCTAssertEqual(TypingMenu.rows(enabled: false, listener: .off, secureInput: false), [])
+        XCTAssertEqual(TypingMenu.rows(enabled: true, listener: .needsPermission, secureInput: false),
                        [.stats, .note("needs Input Monitoring permission"), .openSettings],
                        "saved stats stay readable alongside the permission notice")
-        XCTAssertEqual(TypingMenu.rows(enabled: true, listener: .running, secureInput: false, muteReason: nil), [.stats])
-        XCTAssertEqual(TypingMenu.rows(enabled: true, listener: .running, secureInput: false, muteReason: "muted · Sound is off"),
-                       [.stats, .note("muted · Sound is off")])
+        XCTAssertEqual(TypingMenu.rows(enabled: true, listener: .running, secureInput: false), [.stats])
+    }
+
+    func testCopySaysTypingSoundsHaveTheirOwnSwitch() {
+        XCTAssertTrue(TypingMenu.toggleTooltip.contains("own switch"))
+        XCTAssertTrue(TypingMenu.toggleTooltip.contains("do not mute"))
+        XCTAssertTrue(MenubarDropdown.soundTooltip.contains("Typing sounds have their own switch"))
     }
 }

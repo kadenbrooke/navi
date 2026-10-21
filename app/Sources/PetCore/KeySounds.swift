@@ -3,13 +3,14 @@ import Foundation
 // Typing sounds (a TapNoise-style click for every key press, anywhere) and the typing-speed
 // meter. Everything here is pure; the event tap and the audio engine live in the AppKit target.
 //
-// PRIVACY: which key was pressed is never stored, logged or sent. A key-down is
-// reduced on arrival to a coarse `KeyClass` (space / enter / backspace / other) used only to
-// pick a sound, and to a bare timestamp for the WPM math. Neither the key code nor the class
-// reaches anything persisted: `TypingStats` holds counts and durations only, and
-// `KeyPrivacyTests` proves the saved bytes are identical whichever keys were typed.
+// PRIVACY: which key was pressed is never stored, logged or sent. The key code
+// is used in memory only: as an index into the sound plan precomputed at pack load (the key's
+// own sound and its stereo position, `KeySoundPlan`), and in the held-keys set (a bit per key) that
+// pairs a key-up with its press (`KeyPairing`). The WPM math gets a bare timestamp. Nothing
+// persisted carries a key: `TypingStats` holds counts and durations only, and `KeyPrivacyTests`
+// proves the saved bytes are identical whichever keys were typed.
 
-/// The only thing a key press is allowed to become. Not Codable on purpose.
+/// The coarse kind of a key: space, enter and backspace keep their own sounds. Not Codable on purpose.
 public enum KeyClass: CaseIterable, Sendable {
     case other, space, enter, backspace
 
@@ -24,7 +25,7 @@ public enum KeyClass: CaseIterable, Sendable {
     }
 }
 
-/// Turns a raw key-down into what Navi may use, and drops what it must not react to.
+/// Turns a raw key-down into what the WPM meter may use, and drops what it must not react to.
 public enum KeyEventFilter {
     // macOS virtual key codes (Carbon `kVK_*`), so PetCore needs no Carbon import.
     static let space: UInt16 = 49, returnKey: UInt16 = 36, keypadEnter: UInt16 = 76
@@ -37,31 +38,46 @@ public enum KeyEventFilter {
     }
 
     /// nil = ignore (auto-repeat while a key is held: no click, no count).
-    /// The key code is used here and dropped; only the coarse class leaves.
     public static func press(keyCode: UInt16, isRepeat: Bool, command: Bool, control: Bool) -> Press? {
         if isRepeat { return nil }
-        let c: KeyClass
+        return Press(keyClass: keyClass(keyCode), countsAsTyping: !command && !control)
+    }
+
+    public static func keyClass(_ keyCode: UInt16) -> KeyClass {
         switch keyCode {
-        case space: c = .space
-        case returnKey, keypadEnter: c = .enter
-        case delete, forwardDelete: c = .backspace
-        default: c = .other
+        case space: return .space
+        case returnKey, keypadEnter: return .enter
+        case delete, forwardDelete: return .backspace
+        default: return .other
         }
-        return Press(keyClass: c, countsAsTyping: !command && !control)
     }
 }
 
-/// What the user sets: on/off (OFF until turned on), profile, volume. One JSON blob
-/// under one defaults key, like the look & behaviour config.
+/// What the user sets: on/off (OFF until turned on), profile, volume, quiet on calls
+/// (ON by default). One JSON blob under one defaults key, like the look & behaviour config.
 public struct KeySoundSettings: Codable, Equatable, Sendable {
     public var enabled: Bool = false
     /// Pack id; nil = the first available pack (`SoundPackLibrary.resolve`).
     public var profile: String? = nil
     /// 0…1.
     public var volume: Double = 0.5
+    /// No clicks while any app is using a microphone (`MicActivity`).
+    public var quietOnCalls: Bool = true
 
-    public init(enabled: Bool = false, profile: String? = nil, volume: Double = 0.5) {
-        self.enabled = enabled; self.profile = profile; self.volume = KeySoundSettings.clamp(volume)
+    public init(enabled: Bool = false, profile: String? = nil, volume: Double = 0.5, quietOnCalls: Bool = true) {
+        self.enabled = enabled; self.profile = profile; self.volume = KeySoundSettings.clamp(volume); self.quietOnCalls = quietOnCalls
+    }
+
+    private enum CodingKeys: String, CodingKey { case enabled, profile, volume, quietOnCalls }
+
+    /// Every field optional, so settings saved before a field existed keep the rest (a blob from
+    /// before *Quiet on calls* stays on, with quiet on calls defaulting on).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(enabled: try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false,
+                  profile: try c.decodeIfPresent(String.self, forKey: .profile),
+                  volume: try c.decodeIfPresent(Double.self, forKey: .volume) ?? 0.5,
+                  quietOnCalls: try c.decodeIfPresent(Bool.self, forKey: .quietOnCalls) ?? true)
     }
 
     public static func clamp(_ v: Double) -> Double { v.isFinite ? min(1, max(0, v)) : 0.5 }
@@ -72,7 +88,7 @@ public struct KeySoundSettings: Codable, Equatable, Sendable {
     public init(store: StringStore) {
         guard let s = store.string(forKey: KeySoundSettings.prefsKey),
               let v = try? JSONDecoder().decode(KeySoundSettings.self, from: Data(s.utf8)) else { self.init(); return }
-        self.init(enabled: v.enabled, profile: v.profile, volume: v.volume)
+        self.init(enabled: v.enabled, profile: v.profile, volume: v.volume, quietOnCalls: v.quietOnCalls)
     }
 
     public func save(to store: StringStore) {
@@ -89,18 +105,15 @@ public protocol StringStore {
 
 extension UserDefaults: StringStore {}
 
-/// When a click is allowed to play. The listener (and WPM) runs whenever the feature is on;
-/// only the sound is gated. Asleep is NOT a mute: she naps on her own after 10 quiet minutes.
+/// When a click is allowed to play. The Typing sounds toggle alone
+/// controls clicks. The master Sound switch (agent chimes) and a hidden Navi do NOT mute them;
+/// both are taken here only so the tests pin that down. The listener (and WPM) runs whenever
+/// the feature is on. Asleep is not a mute either: she naps on her own after 10 quiet minutes.
+/// The one other mute is *Quiet on calls*: while it is on and a microphone is in
+/// use, no clicks (WPM still counts).
 public enum KeySoundGate {
-    public static func shouldPlay(enabled: Bool, soundOn: Bool, hidden: Bool) -> Bool {
-        enabled && soundOn && !hidden
-    }
-
-    /// Why an enabled feature is silent, for the dropdown; nil when it plays.
-    public static func muteReason(soundOn: Bool, hidden: Bool) -> String? {
-        if !soundOn { return "muted · Sound is off" }
-        if hidden { return "muted · Navi is hidden" }
-        return nil
+    public static func shouldPlay(enabled: Bool, soundOn: Bool, hidden: Bool, quietOnCalls: Bool, micInUse: Bool) -> Bool {
+        enabled && !(quietOnCalls && micInUse)
     }
 }
 
@@ -146,11 +159,12 @@ public struct PackLoadTracker: Sendable {
     }
 }
 
-/// Picks a sample variant for a class, never the same one twice in a row (sounds less robotic).
+/// Picks a sample variant for a sound slot that has several (space, enter, backspace), never the
+/// same one twice in a row (sounds less robotic).
 public struct VariantPicker {
-    private var last: [KeyClass: Int] = [:]
+    private var last: [Int: Int] = [:]
     public init() {}
-    public mutating func pick<R: RandomNumberGenerator>(_ c: KeyClass, count: Int, using rng: inout R) -> Int {
+    public mutating func pick<R: RandomNumberGenerator>(_ c: Int, count: Int, using rng: inout R) -> Int {
         guard count > 1 else { return 0 }
         var i = Int.random(in: 0..<(count - 1), using: &rng)
         if let l = last[c], i >= l { i += 1 }
@@ -167,8 +181,9 @@ public enum SampleTrim {
 
     /// The range to keep, with a small pre-roll before the first loud sample and a tail after
     /// the last. Empty when the whole sample is silent.
-    public static func range(_ s: [Float], sampleRate: Double, threshold: Float = threshold,
-                             preRoll: Double = 0.002, tail: Double = 0.03) -> Range<Int> {
+    public static func range<C: RandomAccessCollection>(_ s: C, sampleRate: Double, threshold: Float = threshold,
+                                                        preRoll: Double = 0.002, tail: Double = 0.03) -> Range<Int>
+        where C.Element == Float, C.Index == Int {
         guard let first = s.firstIndex(where: { abs($0) > threshold }),
               let last = s.lastIndex(where: { abs($0) > threshold }) else { return 0..<0 }
         let lo = max(0, first - Int(preRoll * sampleRate))
