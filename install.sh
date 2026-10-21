@@ -18,6 +18,7 @@
 #   NAVI_REPO           git repo whose worktrees / PRs to track (optional)
 #   NAVI_THREADS_PATH   snapshot file (default ~/.navi/threads.json)
 #   NAVI_SFX_DIR        where Navi looks for sound files (default ~/Library/Application Support/Navi/sfx)
+#   NAVI_KEYSOUNDS_DIR  typing-sound packs (default ~/Library/Application Support/Navi/keysounds)
 #   NAVI_NODE           node binary for the collector (default: auto-detect, needs Node >= 22.13)
 #   NAVI_NOTIFY_CMD     optional shell command run for "needs you" changes, line in "$1"
 #   NAVI_NO_USAGE=1     skip the quota-usage page's provider polling
@@ -40,7 +41,7 @@ case "${1:-}" in
   --dry-run) MODE="dry-run" ;;
   --stop) MODE="stop" ;;
   --uninstall) MODE="uninstall" ;;
-  -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
   *) echo "unknown option: $1 (try --help)"; exit 2 ;;
 esac
 
@@ -52,7 +53,7 @@ xml_escape() {
 
 # <key>EnvironmentVariables</key> block for every NAVI_* setting that is set.
 env_block() {
-  local keys=(NAVI_REPO NAVI_THREADS_PATH NAVI_SFX_DIR NAVI_NODE NAVI_NOTIFY_CMD NAVI_NO_USAGE)
+  local keys=(NAVI_REPO NAVI_THREADS_PATH NAVI_SFX_DIR NAVI_KEYSOUNDS_DIR NAVI_NODE NAVI_NOTIFY_CMD NAVI_NO_USAGE)
   local k any=""
   for k in "${keys[@]}"; do [ -n "${!k:-}" ] && any=1; done
   [ -z "$any" ] && return 0
@@ -168,6 +169,7 @@ case "$MODE" in
     echo "agents:     $AGENTS/$COLLECTOR_LABEL.plist, $AGENTS/$APP_LABEL.plist"
     echo "snapshot:   ${NAVI_THREADS_PATH:-$HOME/.navi/threads.json}"
     echo "repo:       ${NAVI_REPO:-(none — live sessions only)}"
+    echo "keysounds:  bash keysounds/fetch-keysounds.sh -> ${NAVI_KEYSOUNDS_DIR:-$HOME/Library/Application Support/Navi/keysounds} (public packs + your packs-local.tsv, if any)"
     NODE="${NAVI_NODE:-$(command -v node || true)}"
     if [ -n "$NODE" ] && node_ok "$NODE"; then echo "node:       $NODE ($("$NODE" --version))"; else echo "node:       WARNING — no Node >= 22.13 found (set NAVI_NODE)"; fi
     command -v swift >/dev/null && echo "swift:      $(swift --version 2>&1 | head -1)" || echo "swift:      WARNING — not found (install Xcode or the Command Line Tools)"
@@ -196,6 +198,11 @@ cp "$BIN" "$DEST/Contents/MacOS/$APP_NAME"
 info_plist > "$DEST/Contents/Info.plist"
 # Ad-hoc sign so launch-at-login (SMAppService) and Gatekeeper are happy locally.
 codesign --force --sign - "$DEST" >/dev/null 2>&1 || echo "  (codesign skipped)"
+
+echo "→ fetching typing-sound packs (CC0 / CC-BY, sha256-pinned; audio stays on this Mac, never committed)"
+if ! bash "$ROOT/keysounds/fetch-keysounds.sh"; then
+  echo "  (typing-sound fetch incomplete — missing packs are hidden, the built-in synth click still works; rerun keysounds/fetch-keysounds.sh later)"
+fi
 
 mkdir -p "$AGENTS" "$HOME/Library/Logs" "$(dirname "${NAVI_THREADS_PATH:-$HOME/.navi/threads.json}")"
 chmod +x "$ROOT/collector/run.sh"

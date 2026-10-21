@@ -63,6 +63,7 @@ into both agents. Change one → re-run `./install.sh`.
 | `NAVI_REPO` | *(unset)* | A git repo whose worktrees and PRs become rows. Without it, Navi still shows every live agent session, wherever it runs. |
 | `NAVI_THREADS_PATH` | `~/.navi/threads.json` | The snapshot file. `notified.json`, `threads.prev.json` and `usage-cache.json` live next to it. |
 | `NAVI_SFX_DIR` | `~/Library/Application Support/Navi/sfx` | Where Navi looks for your sound files (see [Sounds](#sounds)). |
+| `NAVI_KEYSOUNDS_DIR` | `~/Library/Application Support/Navi/keysounds` | Typing-sound packs: where `install.sh` fetches them and Navi reads them (see [Typing sounds](#typing-sounds-and-typing-speed)). |
 | `NAVI_NODE` | auto-detect | Node binary for the collector. |
 | `NAVI_NOTIFY_CMD` | *(unset)* | Shell command run when a thread starts needing you (reviewed PR waiting on your merge, branch gone stale). The message is `"$1"`, e.g. `NAVI_NOTIFY_CMD='terminal-notifier -message "$1"'`. |
 | `NAVI_NO_USAGE` | *(unset)* | `1` = never poll quota providers; the usage page stays empty. |
@@ -181,8 +182,9 @@ exits 0, so it cannot block a prompt. Merge these into any hooks you already hav
     or `Quota · Codex blocked`): one row per quota harness with its windows and resets, the
     no-quota footer and the polled time.
   - *Hide Navi* / *Show Navi* (⌥⌘N), *Sleep Navi* / *Wake Navi* (⌥⌘P), then settings: sound,
-    idle notifications, *Open chats in browser*, Launch at Login (leave it off, the
-    LaunchAgent already starts her at login).
+    idle notifications, typing sounds + typing speed (see [below](#typing-sounds-and-typing-speed)),
+    *Open chats in browser*, Launch at Login (leave it off, the LaunchAgent already starts her
+    at login).
   - **Advanced ▸** (also in her right-click menu): *Open status data folder*, *Open sound
     clips folder*, *Copy / Paste look & behaviour settings* (her config JSON) and *Reset look
     & behaviour…*, which asks first.
@@ -213,13 +215,95 @@ Any you leave out stay silent; the menubar menu shows how many are missing. The 
 `.gitignore` blocks audio files, so clips you experiment with inside the clone are never
 committed — only use sounds you have the right to use.
 
+## Typing sounds and typing speed
+
+Off until you turn it on: menubar Triforce → Settings → **Typing sounds**. On, Navi plays a
+mechanical-keyboard click for every key press in any app (TapNoise-style, built in, no extra
+app) and shows your typing speed in the dropdown, right under the toggle:
+`⌨ 72 wpm · today best 95 · avg 61`, refreshed every second while the dropdown is open.
+
+- **Live WPM** counts the presses of the last 10 s (a word = 5 presses); it reads 0 after a
+  3 s pause. **Today best** is the highest live WPM of a burst that ran a full 10 s; **avg** is
+  today's presses over today's typing time (pauses over 3 s are not typing time). Both reset at
+  local midnight and survive a relaunch. Held keys (auto-repeat) are ignored; ⌘ / ⌃ shortcuts
+  click but do not count.
+- **Typing sound ▸** picks the profile (pack name · license; hover for attribution), holds the
+  volume slider and *Open typing sounds folder*. A change plays one preview click. Settings
+  persist (`keySounds` in her defaults).
+- **Mutes**: *Sound* off silences clicks too, and a hidden Navi plays nothing (same rule as her
+  other sounds). Asleep is not muted. While a password field has secure input on, macOS sends
+  no key events at all, so clicks and counting pause by themselves; the dropdown says so.
+
+**Permission: Input Monitoring.** Hearing keys typed in other apps needs it. The first time you
+turn the feature on, macOS asks; if you dismiss that, the dropdown shows *needs Input
+Monitoring permission* and *Open Input Monitoring settings…*: switch Navi on under System
+Settings → Privacy & Security → Input Monitoring. She retries every 2 s and starts listening
+once the grant is visible to her; if the note stays after you switched her on, restart her
+(`pkill -x Navi`, launchd brings her back). Denied or never granted, everything else in Navi
+works as before. The grant is tied to the app's code signature and `install.sh` signs ad hoc,
+so after a reinstall macOS may treat her as a new app: if clicks stop, toggle Navi off and on
+in that list.
+
+**Privacy.** Which key you pressed is never stored, logged or sent. The listen-only event tap
+(`app/Sources/BuildThreadsPet/KeyListener.swift`) hands each key-down to `KeyEventFilter`,
+which reduces it on the spot to a coarse class (space / enter / backspace / other) used only
+to pick a sample. The WPM meter takes only the time of a press, and what is saved is today's
+counts: `day`, `keystrokes`, `activeSeconds`, `bestWPM`. `KeyPrivacyTests` proves the saved
+bytes are identical whichever keys were typed. While the feature is off nothing listens and
+no audio engine exists.
+
+**Latency.** Every sample is decoded once, off the main thread, into a preloaded buffer
+(leading silence trimmed, loudness evened out per pack) and played on a pool of 10
+`AVAudioEngine` voices, so fast typing overlaps clicks. The engine pauses after 2 idle
+minutes; the first click after that is ~150 ms late. Engine calls go through a small
+Objective-C exception guard (`app/Sources/ObjCGuard`), so a dropped audio device costs a
+click, never a crash.
+
+### Sound packs
+
+`install.sh` fetches two redistributable packs with `keysounds/fetch-keysounds.sh` (non-fatal
+if offline). No audio is committed to this repo; packs land in
+`~/Library/Application Support/Navi/keysounds/<pack id>/` (or `NAVI_KEYSOUNDS_DIR`).
+
+| Profile | License | Source |
+|---|---|---|
+| **Cherry KC 1000** | CC0 | "Keyboard Soundpack #1" by unicaegames — [opengameart.org](https://opengameart.org/content/keyboard-soundpack-1-typing-and-single-keystrokes) |
+| **Old Clicky** | CC-BY 3.0 | "Single Key Press Sounds" by eklee, qubodup — [opengameart.org](https://opengameart.org/content/single-key-press-sounds). Attribution: *Single Key Press Sounds by eklee, qubodup*, licensed [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/) |
+| **Synth click** | built-in | generated at runtime by Navi's own code; plays when no pack is installed |
+
+Every download is checked against a sha256 pinned in `keysounds/packs-public.tsv`, zips are
+validated before extraction, and each pack installs atomically; one bad pack is skipped and
+named, the rest still install. Fetch again any time:
+
+```bash
+bash keysounds/fetch-keysounds.sh            # only what is missing
+bash keysounds/fetch-keysounds.sh --force    # re-download everything
+```
+
+**Add your own pack.** Either drop a folder into the keysounds folder (dropdown → *Typing
+sound ▸* → *Open typing sounds folder*):
+
+```
+~/Library/Application Support/Navi/keysounds/my-pack/
+  key-01.wav key-02.wav …       ordinary keys (required)
+  space-01.wav enter-01.wav backspace-01.wav   optional; missing classes use the key samples
+  pack.json                     optional: {"name":"My Pack","license":"CC0","attribution":"…"}
+```
+
+or add a line to `keysounds/packs-local.tsv` (same columns as `packs-public.tsv`, sha256
+required, git-ignored) and run `bash keysounds/fetch-keysounds.sh local`. Any format CoreAudio
+reads works (`.wav` `.aiff` `.aif` `.caf` `.m4a` `.mp3` `.flac`), up to 32 variants per class.
+The new pack shows the next time you open the dropdown, labelled `· local`. Only use sounds
+you have the right to use. Manifest format and the fetcher's safety rules:
+[`keysounds/README.md`](keysounds/README.md).
+
 ## Uninstall
 
 ```bash
 ./install.sh --uninstall                                  # both agents + Navi.app
 rm -rf ~/.navi                                            # snapshot, notification state, usage cache
-rm -rf ~/Library/Application\ Support/Navi                # your sound files
-defaults delete dev.navi.pet                              # position, config, prefs
+rm -rf ~/Library/Application\ Support/Navi                # your sound files + typing-sound packs
+defaults delete dev.navi.pet                              # position, config, prefs, typing settings + today's counts
 rm -f ~/Library/Logs/navi.log ~/Library/Logs/navi-collector.log
 ```
 
@@ -243,6 +327,7 @@ menu, or System Settings → General → Login Items).
 ```bash
 cd app && swift build && swift test          # app + its unit tests (PetCore)
 node --test collector/*.test.mjs             # collector tests (no network, no live services)
+bash keysounds/test-fetch-keysounds.sh       # pack fetcher: checksums, hostile zips, atomic install (needs python3)
 
 # run the app against any snapshot without installing
 cd app && NAVI_THREADS_PATH=Tests/PetCoreTests/Fixtures/threads-sample.json swift run
@@ -255,12 +340,14 @@ collect in the daemon. The collector's internals (event sources, state rules, sn
 shape) are documented in [`collector/README.md`](collector/README.md).
 
 ```
-app/Sources/PetCore/         pure logic, no AppKit — snapshot model, state mapping, colors, menu, sleep
-app/Sources/BuildThreadsPet/ AppKit shell — panel, fairy scene, menu, sounds, menubar, hotkeys
+app/Sources/PetCore/         pure logic, no AppKit — snapshot model, state mapping, colors, menu, sleep, typing sounds + WPM
+app/Sources/BuildThreadsPet/ AppKit shell — panel, fairy scene, menu, sounds, menubar, hotkeys, key listener + click player
+app/Sources/ObjCGuard/       catches Objective-C exceptions from AVAudioEngine
 app/Tests/PetCoreTests/      XCTest + a synthetic threads.json fixture
 collector/                   collect.mjs (one-shot + library), collect-daemon.mjs, notify.mjs, usage.mjs
 collector/hooks/            optional Claude Code hook (see above)
 collector/raycast/           optional Raycast script command (add the folder in Raycast → Script Commands)
+keysounds/                   fetch-keysounds.sh + packs-public.tsv + its test (no audio)
 install.sh                   build + launchd install / stop / uninstall / dry-run
 ```
 

@@ -39,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var feedRecovery = FeedRecovery()
     private var healthTimer: Timer?
     private let idleNotifier = IdleNotifier()
+    /// Typing sounds + WPM (off until turned on in the dropdown).
+    private var keySounds: KeySoundController!
 
     private var now: Double { CACurrentMediaTime() }
 
@@ -50,6 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel = PetPanel()
         panel.contentView = view
         sound = SoundPlayer()
+        keySounds = KeySoundController()
+        keySounds.soundOn = { [weak self] in self?.config.params.sound ?? false }
+        keySounds.hidden = { [weak self] in self?.visibility.hidden ?? true }
         menu = MenuController(sort: config.menuSort)
         menu.onSound = { [weak self] id in self?.sfx(id) }
         menu.onSelect = { [weak self] row, thread in self?.runPrimary(row: row, thread: thread) }
@@ -146,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         store.stop()
         healthTimer?.invalidate(); healthTimer = nil
         link?.invalidate()
+        keySounds?.flush()
     }
 
     private func applyConfig() {
@@ -426,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snd.target = self; snd.state = config.params.sound ? .on : .off
         m.addItem(snd)
         m.addItem(idleNotifyItem())
+        for item in keySounds.menuItems() { m.addItem(item) }
         if !sound.missing.isEmpty {
             let miss = NSMenuItem(title: "\(sound.missing.count) sound\(sound.missing.count == 1 ? "" : "s") not installed → silent", action: nil, keyEquivalent: "")
             miss.toolTip = "Drop your own files in the sfx folder (README → Sounds), then relaunch Navi."
@@ -450,6 +457,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.addItem(advancedItem())
         m.addItem(.separator())
         m.addItem(withTitle: "Quit Navi", action: #selector(quit), keyEquivalent: "q").target = self
+    }
+
+    func menuWillOpen(_ m: NSMenu) {
+        if m === statusMenu { keySounds.menuOpened() }
+    }
+
+    func menuDidClose(_ m: NSMenu) {
+        if m === statusMenu { keySounds.menuClosed() }
     }
 
     /// Developer tools, one level down in both menus (the dropdown and Navi's right-click).

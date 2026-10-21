@@ -11,10 +11,12 @@ let package = Package(
     targets: [
         // Pure-Foundation logic: threads.json parsing, mood, transitions, pet manifests.
         .target(name: "PetCore", path: "Sources/PetCore"),
+        // Catches Objective-C exceptions (AVAudioEngine raises them on a dropped output device).
+        .target(name: "ObjCGuard", path: "Sources/ObjCGuard"),
         // AppKit shell: floating panel, popover, menubar, hotkey, file watcher.
         .executableTarget(
             name: "BuildThreadsPet",
-            dependencies: ["PetCore"],
+            dependencies: ["PetCore", "ObjCGuard"],
             path: "Sources/BuildThreadsPet"
         ),
         .testTarget(

@@ -1,0 +1,14 @@
+# Typing-sound audio is never committed. fetch-keysounds.sh downloads it to
+# ~/Library/Application Support/Navi/keysounds/ — belt and braces here too.
+*.wav
+*.mp3
+*.ogg
+*.m4a
+*.aiff
+*.aif
+*.flac
+*.part
+*.zip
+*.caf
+# Your own pack list (see README → Typing sounds): yours, not the repo's.
+packs-local.tsv

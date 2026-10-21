@@ -1,0 +1,14 @@
+# PUBLIC tier: redistributable packs only (CC0, or CC-BY with the attribution recorded below).
+# The audio itself is never committed: fetch-keysounds.sh downloads it on install.
+# Your own additions go in packs-local.tsv (same columns, git-ignored).
+#
+# Columns (tab-separated): id  name  license  attribution  source page  download url  sha256  map
+#   map = class:pattern;class:pattern  (class = key | space | enter | backspace; key is required)
+#         zip url  -> pattern is a glob inside the unzipped archive
+#         url/     -> pattern is a comma-separated list of files under that base url
+#   sha256 = REQUIRED for every pack, checked before install (mismatch or missing = pack skipped):
+#         zip url  -> sha256 of the archive
+#         url/     -> sha256 of all listed files concatenated in map order
+#                     (bash: cat f1 f2 … | shasum -a 256)
+cherry-kc1000	Cherry KC 1000	CC0	Keyboard Soundpack #1 by unicaegames (CC0)	https://opengameart.org/content/keyboard-soundpack-1-typing-and-single-keystrokes	https://opengameart.org/sites/default/files/unicae_games_keyboard_soundpack_1_0.zip	935eae2fa5c3742eacdd38c4ea0e9047f3887faa0701996498492c256db1b351	key:Single Keys/keypress-*.wav
+eklee-old	Old Clicky	CC-BY 3.0	Single Key Press Sounds by eklee, qubodup (CC-BY 3.0, https://creativecommons.org/licenses/by/3.0/)	https://opengameart.org/content/single-key-press-sounds	https://opengameart.org/sites/default/files/eklee-KeyPresses-cc0-opengameart.zip	45c9b07560f7123ced930584c9b6a6de50551620b1c968b973f495dec21c8987	key:eklee-KeyPresses-cc0-opengameart/wav44100/eklee-KeyPressOld0*.wav

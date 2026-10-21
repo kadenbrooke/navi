@@ -91,5 +91,9 @@ enum Paths {
     /// Your own sound files (see README → Sounds). None ship with Navi; missing = silent.
     static let sfxDir: URL = envPath("NAVI_SFX_DIR")
         ?? home.appendingPathComponent("Library/Application Support/Navi/sfx", isDirectory: true)
+    /// Typing-sound packs, one folder each (see README → Typing sounds). Fetched by
+    /// `keysounds/fetch-keysounds.sh` or added by you; none ship with Navi. `NAVI_KEYSOUNDS_DIR` overrides it.
+    static let keySoundsDir: URL = envPath("NAVI_KEYSOUNDS_DIR")
+        ?? home.appendingPathComponent("Library/Application Support/Navi/keysounds", isDirectory: true)
     static let collectorInstallHint = "collector not running — run ./install.sh"
 }
