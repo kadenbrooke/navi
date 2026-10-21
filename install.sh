@@ -24,7 +24,7 @@
 #   NAVI_NO_USAGE=1     skip the quota-usage page's provider polling
 #   NAVI_SIGN_IDENTITY  codesign identity for Navi.app (default: this Mac's first Apple Development
 #                       identity, else ad-hoc; `-` forces ad-hoc). Not baked into the agents.
-#   NAVI_SIGN_TIMEOUT   seconds before a codesign call is given up on (default 20)
+#   NAVI_SIGN_TIMEOUT   seconds before a codesign call is given up on (1-120, default 20)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -207,7 +207,14 @@ info_plist > "$DEST/Contents/Info.plist"
 # prompts), or NAVI_SIGN_IDENTITY names one (`-` = ad-hoc). Each codesign call is cut off after
 # NAVI_SIGN_TIMEOUT seconds (default 20), so a Keychain access prompt can never stall the
 # install: a detected identity that fails or times out falls back to ad-hoc signing.
+# Only a whole number of seconds from 1 to 120: 0 (or anything Perl reads as 0) would turn the
+# alarm off and let a Keychain prompt hang codesign forever.
 SIGN_TIMEOUT="${NAVI_SIGN_TIMEOUT:-20}"
+if ! [[ "$SIGN_TIMEOUT" =~ ^[0-9]{1,3}$ ]] || (( 10#$SIGN_TIMEOUT < 1 || 10#$SIGN_TIMEOUT > 120 )); then
+  echo "WARNING: NAVI_SIGN_TIMEOUT must be a whole number of seconds from 1 to 120; using 20." >&2
+  SIGN_TIMEOUT=20
+fi
+SIGN_TIMEOUT=$((10#$SIGN_TIMEOUT))
 sign_bundle() {
   local identity="$1"
   perl -e 'alarm shift; exec @ARGV' "$SIGN_TIMEOUT" \

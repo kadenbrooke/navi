@@ -84,7 +84,7 @@ signing you have to grant Input Monitoring again after each reinstall. To avoid 
    Monitoring will reset on each install.
 
 Nothing is hardcoded: no identity or team ID ships in this repo. Each `codesign` call is cut
-off after `NAVI_SIGN_TIMEOUT` seconds (default 20), so a Keychain access prompt left
+off after `NAVI_SIGN_TIMEOUT` seconds (a whole number from 1 to 120; anything else falls back to the default 20 with a warning), so a Keychain access prompt left
 unanswered can never stall the install; it just falls back to ad-hoc. The first install with a
 stable identity needs one last re-grant (toggle Navi off and on under Input Monitoring); after
 that, reinstalls keep it. These two variables are read at install time only and are not

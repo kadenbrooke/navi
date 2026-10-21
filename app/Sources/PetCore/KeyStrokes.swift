@@ -146,10 +146,14 @@ public enum KeyTap {
 /// - A down is a second report of the current press's down (dropped) only when another source
 ///   reported that same down within the window. Anything else starts a new press: a source that
 ///   already reported this down (down, up, down from one source is two presses however fast), a
-///   down after the window, or a down with no press to join. A down can never join an earlier up.
-/// - An up releases the press if it is down (the first up wins, from any source); an up from
-///   another source within the window of that release is its twin (dropped); any other up is
-///   stray. An up can never join a down.
+///   down after the window, or a down with no press to join. A down can never join an earlier up:
+///   once the press has an up, only a down whose event time is before that up can be its twin
+///   (one source reporting the press only after the other reported it released); a later down
+///   is a new press, even from another source and inside the window.
+/// - An up releases the press if it is down and the up's event time is not before the press's
+///   down (the first up wins, from any source); an older up, a late report from a previous
+///   press, never releases a newer one. An up from another source within the window of that
+///   release is its twin (dropped); any other up is stray. An up can never join a down.
 /// - A new press while the previous one is still down (its up was lost) forgets the old one
 ///   (`.lost`, no sound) before it plays.
 /// - Every flag change and key-down carries the live modifier flags: a modifier still down here
@@ -262,7 +266,9 @@ public struct KeyStrokeRouter: Sendable {
     // MARK: the logical press
 
     private mutating func down(_ k: UInt16, from s: KeySource, at t: TimeInterval) -> [KeyStroke] {
-        if var p = presses[k], !p.downSources.isEmpty, !p.downSources.contains(s), abs(t - p.downAt) < KeyStrokeRouter.duplicateWindow {
+        // A twin only of the press as it was at `t`: still down, or released after `t`.
+        if var p = presses[k], p.down || t < p.upAt, !p.downSources.isEmpty, !p.downSources.contains(s),
+           abs(t - p.downAt) < KeyStrokeRouter.duplicateWindow {
             p.downSources.append(s)   // another report of this same down
             presses[k] = p
             return []
@@ -278,6 +284,7 @@ public struct KeyStrokeRouter: Sendable {
     private mutating func up(_ k: UInt16, from s: KeySource, at t: TimeInterval) -> [KeyStroke] {
         guard var p = presses[k] else { return [] }
         if p.down {
+            guard t >= p.downAt else { return [] }   // a late up from an earlier press: not this one's
             p.down = false; p.upSources = [s]; p.upAt = t
             presses[k] = p
             return [.up(k)]

@@ -425,6 +425,56 @@ final class AllKeysTests: XCTestCase {
         XCTAssertEqual(s.presses, [109, 109]); XCTAssertEqual(s.releases, [109, 109])
     }
 
+    /// Mute reported as a media event (type 7) or key code 74, at absolute event times.
+    func muteEvent(_ r: inout Rig, media: Bool, down: Bool, at t: TimeInterval) {
+        if media {
+            r.apply(r.router.mediaKey(subtype: 8, data1: 7 << 16 | (down ? 0x0A : 0x0B) << 8, now: t))
+        } else if down {
+            r.apply(r.router.keyDown(74, isRepeat: false, flags: 0, now: t))
+        } else {
+            r.apply(r.router.keyUp(74, now: t))
+        }
+    }
+
+    func testRepressFromTheOtherSourceInsideTheWindowIsANewPress() {
+        // A press reported by one source only goes down and up; the next press comes from the
+        // other source 25 ms after the first went down (inside the window), after its up.
+        for mediaFirst in [true, false] {
+            var r = Rig(); let t = r.t
+            muteEvent(&r, media: mediaFirst, down: true, at: t)
+            muteEvent(&r, media: mediaFirst, down: false, at: t + 0.02)
+            muteEvent(&r, media: !mediaFirst, down: true, at: t + 0.025)
+            muteEvent(&r, media: !mediaFirst, down: false, at: t + 0.045)
+            XCTAssertEqual(r.presses, [109, 109], "media first: \(mediaFirst): the re-press is not a twin")
+            XCTAssertEqual(r.releases, [109, 109], "media first: \(mediaFirst)")
+            XCTAssertEqual(r.lost, [])
+            XCTAssertEqual(r.router.heldCount, 0)
+        }
+    }
+
+    func testLateUpFromAnEarlierPressNeverReleasesTheNewOne() {
+        // Press A is reported by both sources; one source's up releases it; press B starts from
+        // the other source; only then is A's second up handled, stamped before B went down.
+        for mediaFirst in [true, false] {
+            var r = Rig(); let t = r.t
+            muteEvent(&r, media: mediaFirst, down: true, at: t)
+            muteEvent(&r, media: !mediaFirst, down: true, at: t + 0.0004)
+            muteEvent(&r, media: mediaFirst, down: false, at: t + 0.02)           // A released
+            muteEvent(&r, media: !mediaFirst, down: true, at: t + 0.025)          // B goes down
+            muteEvent(&r, media: !mediaFirst, down: false, at: t + 0.0204)        // A's late twin up
+            XCTAssertEqual(r.presses, [109, 109], "media first: \(mediaFirst)")
+            XCTAssertEqual(r.releases, [109], "media first: \(mediaFirst): the late up is A's, not B's")
+            XCTAssertEqual(r.router.heldCount, 1, "B is still held")
+            muteEvent(&r, media: mediaFirst, down: true, at: t + 0.0254)          // B's twin down
+            muteEvent(&r, media: !mediaFirst, down: false, at: t + 0.06)
+            muteEvent(&r, media: mediaFirst, down: false, at: t + 0.0604)
+            XCTAssertEqual(r.presses, [109, 109], "media first: \(mediaFirst): B's twin down joins B")
+            XCTAssertEqual(r.releases, [109, 109], "media first: \(mediaFirst): B's own up releases it")
+            XCTAssertEqual(r.lost, [])
+            XCTAssertEqual(r.router.heldCount, 0)
+        }
+    }
+
     func testEventClockReadsEitherTimestampUnit() {
         let now: UInt64 = 63_182_281_687_000   // 63 182 s of uptime, in ns
         // Apple silicon: mach ticks of 125/3 ns.
