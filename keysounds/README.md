@@ -27,7 +27,7 @@ disappears falls back to the first pack left.
 | local | `packs-local.tsv` | your own additions; checking the license is up to you | no (git-ignored); a clone without it just fetches the public list |
 
 Manifest columns (tab-separated): `id  name  license  attribution  source page  download url
-sha256  map`. `id` is lowercase letters, digits and `-`. `attribution` is `-` when there is
+sha256  map`. `id` is lowercase letters, digits and `-` (not first), at most 64 characters; any other id fails that pack before a single path is built from it. `attribution` is `-` when there is
 none. `map` is `class:pattern;class:pattern` with class `key` (required), `space`, `enter` or
 `backspace`; for a `.zip` url the pattern is a glob inside the archive, for a url ending in `/`
 it is a comma-separated file list under that url (pin raw GitHub urls to a commit).

@@ -127,5 +127,29 @@ out="$(run all --force)"; code=$?
 check "public-only clone: local list skipped, exit 0" '[[ $code -eq 0 ]] && echo "$out" | grep -q "skip    local tier"'
 check "--force swaps in a fresh copy" '[[ ! -e "$DEST/good/marker" && -f "$DEST/good/key-01.wav" ]]'
 
+# Pack ids that are not one plain name are rejected before any path is built from them. The
+# script's temp dir shares a parent with this test's ($W, both from `mktemp -d`), so an id of
+# `../<name>` would point its `$TMP/$id.zip` cleanup at "$(dirname "$W")/<name>.zip": a
+# sentinel there must survive.
+SENT="navi-keysounds-sentinel-$$-$RANDOM"
+SENTINEL="$(dirname "$W")/$SENT.zip"
+trap 'rm -rf "$W"; rm -f "$SENTINEL"' EXIT
+printf 'keep me' > "$SENTINEL"
+MAN2="$W/manifests-ids"; DEST2="$W/dest-ids"; mkdir -p "$MAN2" "$DEST2"
+LONG="$(printf 'a%.0s' {1..65})"
+{
+  for bad in "../$SENT" "../evil" "/abs" "a/b" ".hidden" "Upper" "has space" "-lead" "$LONG"; do
+    row "$bad" "$U/good.zip" "$(sha "$FIX/good.zip")" "key:pack/key-*.wav"
+  done
+  row "$(printf 'b%.0s' {1..64})" "$U/good.zip" "$(sha "$FIX/good.zip")" "key:pack/key-*.wav"
+} > "$MAN2/packs-public.tsv"
+out="$(NAVI_KEYSOUNDS_MANIFESTS="$MAN2" NAVI_KEYSOUNDS_DIR="$DEST2" NAVI_KEYSOUNDS_ALLOW_FILE_URLS=1 "$RUNNER" "$SCRIPT" public 2>&1)"; code=$?
+echo "$out" | sed 's/^/      | /'
+check "bad ids: every one rejected as an invalid pack id" '[[ $(echo "$out" | grep -c ": invalid pack id") -eq 9 && $code -ne 0 ]]'
+check "bad ids: ../ /abs a/b .hidden Upper space -lead and 65 chars all named" 'echo "$out" | grep -q "done: 1 ok, 9 failed" && ( for p in "\.\./evil" "/abs" "a/b" "\.hidden" "Upper" "has\\\\ space" "-lead" "$LONG"; do echo "$out" | grep -q -- "FAILED  $p: invalid pack id" || exit 1; done )'
+check "bad ids: sentinel outside the temp dir survives" '[[ "$(cat "$SENTINEL")" == "keep me" ]]'
+check "bad ids: nothing written outside the packs folder" '[[ ! -e "$(dirname "$W")/evil.zip" && ! -e /abs && ! -e "$DEST2/a" && -z "$(ls -A "$DEST2" | grep -v "^bbbb")" ]]'
+check "a 64-character id is still valid" '[[ -f "$DEST2/$(printf "b%.0s" {1..64})/key-01.wav" ]]'
+
 echo "$pass passed, $failn failed ($RUNNER)"
 [[ $failn -eq 0 ]]

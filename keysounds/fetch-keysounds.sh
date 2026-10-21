@@ -55,6 +55,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 json() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
 sha256() { shasum -a 256 | cut -d' ' -f1; }
+# A pack id becomes part of every path the pack touches (temp, stage, install, backups), so it
+# must be one plain name: lowercase letters, digits and `-`, at most 64 characters. No `/`,
+# no `.`, no leading `-`.
+valid_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; }
 is_audio() { [[ "$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')" =~ ^(wav|mp3|flac|aif|aiff|caf|m4a)$ ]]; }
 
 # Per-pack limits, shared by both pack kinds. Zip: checked from the archive's directory before
@@ -101,12 +105,19 @@ real_path() { local d; d="$(cd "$(dirname "$1")" && pwd -P)" || return 1; printf
 # Runs in a subshell per pack: any failure returns non-zero and leaves the installed copy alone.
 fetch_pack() {
   local tier=$1 id=$2 name=$3 license=$4 attribution=$5 source=$6 url=$7 sha=$8 map=$9
+  # First, before any path is built from it: a bad id fails the pack with no file touched.
+  if ! valid_id "$id"; then
+    printf 'FAILED  %q: invalid pack id (lowercase letters, digits and -, max 64), nothing done\n' "$id"
+    return 1
+  fi
   local final="$DEST/$id" stage="$TMP/stage-$id" root="" got entry cls spec n f ext out
   # A failed pack's temp files go at once (not only at exit), so an abandoned pack never keeps
-  # its downloads around while the next pack runs.
-  fail() { echo "FAILED  $id: $*"; rm -rf "$stage" "$TMP/unzip-$id" "$TMP/$id.zip"; return 1; }
-
-  [[ "$id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { fail "bad pack id"; return 1; }
+  # its downloads around while the next pack runs. Belt and braces: never rm for a bad id.
+  fail() {
+    echo "FAILED  $id: $*"
+    valid_id "$id" && rm -rf "$stage" "$TMP/unzip-$id" "$TMP/$id.zip"
+    return 1
+  }
   [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { fail "no sha256 pinned in the manifest"; return 1; }
   if [[ "$FORCE" != "--force" && -s "$final/pack.json" ]] && grep -q "\"sha256\":\"$sha\"" "$final/pack.json"; then
     echo "keep    $id ($tier)"; return 0
@@ -210,7 +221,7 @@ for tier in $TIERS; do
     if ( fetch_pack "$tier" "$id" "$name" "$license" "$attribution" "$source" "$url" "$sha" "$map" ); then
       ok=$((ok+1))
     else
-      failed+=("$id")
+      failed+=("$(printf '%q' "$id")")
     fi
   done < "$list"
 done
