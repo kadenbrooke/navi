@@ -475,6 +475,64 @@ final class AllKeysTests: XCTestCase {
         }
     }
 
+    func testLateDownFromAnEarlierPressNeverJoinsTheNewOne() {
+        // Press A: one source's down and up; press B starts from that source; only then is A's
+        // second down handled, stamped long before A's up. It must not join B, or B's own second
+        // down would read as a third press (and B as lost).
+        for mediaFirst in [true, false] {
+            var r = Rig(); let t = r.t
+            muteEvent(&r, media: mediaFirst, down: true, at: t)
+            muteEvent(&r, media: mediaFirst, down: false, at: t + 0.02)           // A released
+            muteEvent(&r, media: mediaFirst, down: true, at: t + 0.025)           // B goes down
+            muteEvent(&r, media: !mediaFirst, down: true, at: t + 0.0004)         // A's late twin down
+            XCTAssertEqual(r.presses, [109, 109], "media first: \(mediaFirst): the late down is A's")
+            muteEvent(&r, media: !mediaFirst, down: false, at: t + 0.0204)        // A's late twin up
+            muteEvent(&r, media: !mediaFirst, down: true, at: t + 0.0254)         // B's twin down
+            XCTAssertEqual(r.router.heldCount, 1, "B is still held")
+            muteEvent(&r, media: mediaFirst, down: false, at: t + 0.045)
+            muteEvent(&r, media: !mediaFirst, down: false, at: t + 0.0454)
+            XCTAssertEqual(r.presses, [109, 109], "media first: \(mediaFirst): two presses, no third")
+            XCTAssertEqual(r.releases, [109, 109], "media first: \(mediaFirst)")
+            XCTAssertEqual(r.lost, [], "media first: \(mediaFirst): B is never taken for lost")
+            XCTAssertEqual(r.router.heldCount, 0)
+        }
+    }
+
+    /// Two quick presses (each 20 ms, the second 5 ms after the first ends), each reported by the
+    /// media event and key code 74. Each source delivers its own reports in order, but the two
+    /// sources interleave any way: all 70 merges of the two streams, with either source stamped
+    /// first. Always exactly two presses and two releases, nothing lost, and nothing kept once the
+    /// window has passed.
+    func testEveryInterleavingOfTwoQuickMixedSourcePressesIsTwoPresses() {
+        typealias Report = (media: Bool, down: Bool, at: TimeInterval)
+        func merges(_ a: [Report], _ b: [Report]) -> [[Report]] {
+            if a.isEmpty { return [b] }
+            if b.isEmpty { return [a] }
+            return merges(Array(a.dropFirst()), b).map { [a[0]] + $0 } + merges(a, Array(b.dropFirst())).map { [b[0]] + $0 }
+        }
+        var cases = 0
+        for mediaFirst in [true, false] {
+            let t: TimeInterval = 100
+            func stream(media: Bool) -> [Report] {
+                let lag = media == mediaFirst ? 0 : 0.0004
+                return [(media, true, t + lag), (media, false, t + 0.02 + lag), (media, true, t + 0.025 + lag), (media, false, t + 0.045 + lag)]
+            }
+            for order in merges(stream(media: true), stream(media: false)) {
+                var r = Rig()
+                for e in order { muteEvent(&r, media: e.media, down: e.down, at: e.at) }
+                let desc = order.map { "\($0.media ? "media" : "code")\($0.down ? "↓" : "↑")@\(Int((($0.at - t) * 10_000).rounded()))" }.joined(separator: " ")
+                XCTAssertEqual(r.presses, [109, 109], desc)
+                XCTAssertEqual(r.releases, [109, 109], desc)
+                XCTAssertEqual(r.lost, [], desc)
+                XCTAssertEqual(r.router.heldCount, 0, desc)
+                r.router.expire(now: t + 0.0454 + KeyStrokeRouter.duplicateWindow)
+                XCTAssertEqual(r.router.pendingReports, 0, "\(desc): nothing outlives the window")
+                cases += 1
+            }
+        }
+        XCTAssertEqual(cases, 140)
+    }
+
     func testEventClockReadsEitherTimestampUnit() {
         let now: UInt64 = 63_182_281_687_000   // 63 182 s of uptime, in ns
         // Apple silicon: mach ticks of 125/3 ns.

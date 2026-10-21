@@ -142,7 +142,13 @@ public enum KeyTap {
 /// (`KeyTap.routedKeys`: modifiers, caps lock, F1–F12), whichever way macOS reports it (key code,
 /// flag change, media event), goes through one model, the **logical press**: a generation number,
 /// whether it is still down, and, for `duplicateWindow` only, which sources reported its down and
-/// its up, and when.
+/// its up, and when. Beside the current press, the **previous** (released) press's record is kept
+/// for the window too, so every report is classified by its own event time, whatever order the
+/// sources deliver in:
+/// - A down stamped at or before the previous press's up belongs to the previous press: a late
+///   twin, dropped.
+/// - An up stamped before the current press's down belongs to the previous press: dropped.
+/// - Everything else goes to the current press, by the rules below.
 /// - A down is a second report of the current press's down (dropped) only when another source
 ///   reported that same down within the window. Anything else starts a new press: a source that
 ///   already reported this down (down, up, down from one source is two presses however fast), a
@@ -181,6 +187,9 @@ public struct KeyStrokeRouter: Sendable {
 
     /// The current press of each routed key that has one.
     private var presses: [UInt16: LogicalPress] = [:]
+    /// The released press before it, while the window lasts: late reports of it are told apart
+    /// from the current press by their event times.
+    private var previous: [UInt16: LogicalPress] = [:]
     private var lastGeneration: UInt32 = 0
     /// Caps lock's lock state as last reported; nil = not known yet (start, or after a reset).
     private var capsLocked: Bool?
@@ -238,8 +247,10 @@ public struct KeyStrokeRouter: Sendable {
     }
 
     /// Ends the duplicate window for reports older than it at `now`: their sources and times are
-    /// dropped (a released press is forgotten entirely; a held one keeps only that it is held).
+    /// dropped (a released press is forgotten entirely, the previous press too; a held one keeps
+    /// only that it is held).
     public mutating func expire(now: TimeInterval) {
+        for (k, p) in previous where now - max(p.downAt, p.upAt) >= KeyStrokeRouter.duplicateWindow { previous[k] = nil }
         for (k, p) in presses {
             let last = max(p.downAt, p.upAt)
             guard now - last >= KeyStrokeRouter.duplicateWindow else { continue }
@@ -252,12 +263,13 @@ public struct KeyStrokeRouter: Sendable {
     }
 
     /// Presses still carrying report sources or times (none once `expire` has run past the window).
-    public var pendingReports: Int { presses.values.filter { !$0.downSources.isEmpty || !$0.down }.count }
+    public var pendingReports: Int { presses.values.filter { !$0.downSources.isEmpty || !$0.down }.count + previous.count }
 
     /// Forget everything (tap disabled by the system, feature off): every press, its reports, the
     /// caps lock state; a pending caps release then finds nothing.
     public mutating func reset() {
         presses.removeAll()
+        previous.removeAll()
         capsLocked = nil
     }
 
@@ -266,6 +278,8 @@ public struct KeyStrokeRouter: Sendable {
     // MARK: the logical press
 
     private mutating func down(_ k: UInt16, from s: KeySource, at t: TimeInterval) -> [KeyStroke] {
+        // Stamped while the previous press was still down: a late report of it.
+        if let prev = previous[k], t <= prev.upAt { return [] }
         // A twin only of the press as it was at `t`: still down, or released after `t`.
         if var p = presses[k], p.down || t < p.upAt, !p.downSources.isEmpty, !p.downSources.contains(s),
            abs(t - p.downAt) < KeyStrokeRouter.duplicateWindow {
@@ -274,7 +288,14 @@ public struct KeyStrokeRouter: Sendable {
             return []
         }
         var out: [KeyStroke] = []
-        if presses[k]?.down == true { out.append(.lost(k)) }   // its up never came: forget it, no sound
+        if let p = presses[k] {
+            if p.down {
+                out.append(.lost(k))   // its up never came: forget it, no sound
+            } else {
+                // Released: kept while the window lasts, to place its late reports.
+                previous[k] = t - p.upAt < KeyStrokeRouter.duplicateWindow ? p : nil
+            }
+        }
         lastGeneration &+= 1
         presses[k] = LogicalPress(generation: lastGeneration, down: true, downSources: [s], downAt: t)
         out.append(.down(k))
@@ -282,9 +303,9 @@ public struct KeyStrokeRouter: Sendable {
     }
 
     private mutating func up(_ k: UInt16, from s: KeySource, at t: TimeInterval) -> [KeyStroke] {
-        guard var p = presses[k] else { return [] }
+        // Stamped before the current press went down: a late report of an earlier press.
+        guard var p = presses[k], t >= p.downAt else { return [] }
         if p.down {
-            guard t >= p.downAt else { return [] }   // a late up from an earlier press: not this one's
             p.down = false; p.upSources = [s]; p.upAt = t
             presses[k] = p
             return [.up(k)]
